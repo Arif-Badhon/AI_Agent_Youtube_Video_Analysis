@@ -1,0 +1,12 @@
+# requirements.txt
+youtube-transcript-api
+gradio>=4.0
+python-dotenv
+openai
+langchain
+transformers
+torch
+llama-cpp-python
+accelerate
+sentencepiece
+protobuf
