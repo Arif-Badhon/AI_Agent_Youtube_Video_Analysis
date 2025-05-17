@@ -25,7 +25,8 @@ summarizer = pipeline(
     "summarization",
     model=MODEL_NAME,
     tokenizer=MODEL_NAME,
-    device=0 if torch.cuda.is_available() else -1  # Use GPU if available
+    device=0 if torch.cuda.is_available() else -1,  # Use GPU if available
+    framework="pt"
 )
 
 
@@ -42,10 +43,13 @@ Transcript: {transcript}
 def generate_summary(transcript):
     return summarizer(
         transcript,
-        max_length=150,
-        min_length=40,
+        max_length=300,  # Increased from 150
+        min_length=120,   # Increased from 40
+        num_beams=4,      # Better quality generation
+        no_repeat_ngram_size=3,  # Prevent repetition
         do_sample=False,
-        truncation=True
+        truncation=True,
+        clean_up_tokenization_spaces=True
     )[0]['summary_text']
 
 
@@ -60,3 +64,35 @@ def answer_question(transcript, question):
         question=question,
         context=transcript[:1024]  # Model's max context
     )['answer']
+
+
+# agent.py - Add translation functionality
+from transformers import MBart50TokenizerFast, MBartForConditionalGeneration
+
+translation_model = MBartForConditionalGeneration.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
+translation_tokenizer = MBart50TokenizerFast.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
+
+LANGUAGE_MAPPING = {
+    "French": "fr_XX",
+    "Spanish": "es_XX",
+    "German": "de_DE",
+    "Chinese": "zh_CN",
+    "Hindi": "hi_IN",
+    "Bengali": "bn_IN"
+}
+
+def translate_summary(summary, target_lang):
+    translation_tokenizer.src_lang = "en_XX"
+    inputs = translation_tokenizer(
+        summary, 
+        return_tensors="pt", 
+        truncation=True, 
+        max_length=1024
+    )
+    
+    generated_tokens = translation_model.generate(
+        **inputs,
+        forced_bos_token_id=translation_tokenizer.lang_code_to_id[target_lang]
+    )
+    
+    return translation_tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]

@@ -1,0 +1,182 @@
+Code file structure:
+├── __init__.py
+├── README.md
+├── requirements.txt
+└── src
+    └── app
+        ├── backend
+        │   ├── agent.py
+        │   ├── __init__.py
+        │   ├── __pycache__
+        │   │   ├── agent.cpython-312.pyc
+        │   │   ├── __init__.cpython-312.pyc
+        │   │   └── utils.cpython-312.pyc
+        │   └── utils.py
+        ├── frontend
+        │   ├── gradio_app.py
+        │   └── __init__.py
+        ├── __init__.py
+        └── __pycache__
+            └── __init__.cpython-312.pyc
+
+Here are the codes:
+agent.py:
+# backend/agent.py
+#from openai import OpenAI
+#from langchain.prompts import PromptTemplate
+import os
+from dotenv import load_dotenv
+from transformers import pipeline
+import torch
+
+# Load environment variables
+load_dotenv()
+
+#client = OpenAI(OPENAI_API_KEY=os.getenv("OPENAI_API_KEY"))
+
+#client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+MODEL_NAME = os.getenv("MODEL_NAME")  # or your chosen model
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype="auto", device_map="auto")
+
+summarizer = pipeline(
+    "summarization",
+    model=MODEL_NAME,
+    tokenizer=MODEL_NAME,
+    device=0 if torch.cuda.is_available() else -1  # Use GPU if available
+)
+
+
+
+summary_template = """Generate concise video summary with timestamps:
+{transcript}
+"""
+
+qa_template = """Answer using video transcript:
+Question: {question}
+Transcript: {transcript}
+"""
+
+def generate_summary(transcript):
+    return summarizer(
+        transcript,
+        max_length=150,
+        min_length=40,
+        do_sample=False,
+        truncation=True
+    )[0]['summary_text']
+
+
+
+qa_pipeline = pipeline(
+    "question-answering",
+    model="deepset/roberta-base-squad2"
+)
+
+def answer_question(transcript, question):
+    return qa_pipeline(
+        question=question,
+        context=transcript[:1024]  # Model's max context
+    )['answer']
+
+utils.py:
+# backend/utils.py
+from youtube_transcript_api import YouTubeTranscriptApi
+import re
+
+def extract_video_id(url):
+    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
+    match = re.search(regex, url)
+    return match.group(1) if match else None
+
+def get_transcript(url):
+    video_id = extract_video_id(url)
+    transcript = YouTubeTranscriptApi.get_transcript(video_id)
+    return " ".join([entry['text'] for entry in transcript])
+
+gradio_app.py:
+import gradio as gr
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+from app.backend.agent import generate_summary, answer_question
+from app.backend.utils import get_transcript
+
+css = """
+.gradio-container {max-width: 900px!important}
+footer {visibility: hidden}
+"""
+
+with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
+    gr.Markdown("# YouTube AI Analyzer 🎥")
+    
+    with gr.Tab("Video Analysis"):
+        with gr.Row():
+            url_input = gr.Textbox(label="YouTube URL", placeholder="Paste video URL here...")
+            summary_output = gr.Textbox(label="Video Summary", interactive=False)
+        
+        with gr.Row():
+            analyze_btn = gr.Button("Analyze Video", variant="primary")
+    
+    with gr.Tab("Q&A"):
+        question_input = gr.Textbox(label="Ask about the video")
+        answer_output = gr.Textbox(label="Answer")
+        ask_btn = gr.Button("Get Answer", variant="secondary")
+
+    def analyze_video(url):
+        transcript = get_transcript(url)
+        return generate_summary(transcript)
+    
+    def handle_question(url, question):
+        transcript = get_transcript(url)
+        return answer_question(transcript, question)
+
+    analyze_btn.click(
+        fn=analyze_video,
+        inputs=url_input,
+        outputs=summary_output
+    )
+    
+    ask_btn.click(
+        fn=handle_question,
+        inputs=[url_input, question_input],
+        outputs=answer_output
+    )
+
+if __name__ == "__main__":
+    app.launch()
+
+.env:
+OPENAI_API_KEY=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
+MODEL_NAME = "sshleifer/distilbart-cnn-12-6"
+
+requirements.txt:
+# requirements.txt
+youtube-transcript-api
+gradio>=4.0
+python-dotenv
+openai
+langchain
+transformers
+torch
+llama-cpp-python
+accelerate
+sentencepiece
+protobuf
+
+
+.gitignore: 
+.env
+venv/
+__pycache__/
+*.pyc
+.venv
+
+
+
