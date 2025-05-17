@@ -1,16 +1,19 @@
-# requirements.txt
+# Keep only these core dependencies
 youtube-transcript-api
-gradio>=4.0
-python-dotenv
-openai
-langchain
-transformers
-torch
-llama-cpp-python
-accelerate
+setuptools>=68.0.0
+gradio>=4.25.0
+transformers>=4.37.0
+torch>=2.2.2
+accelerate>=0.31.0
 sentencepiece
 protobuf
 langdetect==1.0.9
 pytube==15.0.0
 openai-whisper==20231117
 ffmpeg-python==0.2.0
+keybert==0.7.0
+sentence-transformers==2.7.0
+networkx==3.2.1
+matplotlib==3.8.2
+python-louvain==0.16
+python-dotenv

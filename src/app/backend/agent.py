@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 from transformers import pipeline
 import torch
 import whisper
+from typing import Tuple
+from transformers import pipeline
 
 # Load environment variables
 load_dotenv()
@@ -27,7 +29,11 @@ summarizer = pipeline(
     model=MODEL_NAME,
     tokenizer=MODEL_NAME,
     device=0 if torch.cuda.is_available() else -1,  # Use GPU if available
-    framework="pt"
+    framework="pt",
+    truncation=True,  # Force truncation
+    max_length=1024,  # BART's max input length
+    min_length=100,
+    num_beams=4
 )
 
 
@@ -47,17 +53,35 @@ def get_whisper_model():
     return whisper.load_model(WHISPER_MODEL)
 
 
-def generate_summary(transcript):
+def chunk_text(text, max_tokens=1000):
+    tokens = tokenizer.encode(text, truncation=False)
+    chunks = [tokens[i:i+max_tokens] for i in range(0, len(tokens), max_tokens)]
+    return [tokenizer.decode(chunk) for chunk in chunks]
+
+def generate_summary(transcript, mode="medium"):
+    valid_modes = ["short", "medium", "detailed"]
+    mode = mode.lower()
+    if mode not in valid_modes:
+        mode = "medium"
+    
+    mode_settings = {
+        "short": {"max": 150, "min": 40, "beams": 4},
+        "medium": {"max": 300, "min": 120, "beams": 5},
+        "detailed": {"max": 600, "min": 200, "beams": 6}
+    }
+    
+    config = mode_settings[mode]
+    
     return summarizer(
         transcript,
-        max_length=300,  # Increased from 150
-        min_length=120,   # Increased from 40
-        num_beams=4,      # Better quality generation
-        no_repeat_ngram_size=3,  # Prevent repetition
+        max_length=config["max"],
+        min_length=config["min"],
+        num_beams=config["beams"],
+        no_repeat_ngram_size=3,
         do_sample=False,
-        truncation=True,
-        clean_up_tokenization_spaces=True
+        truncation=True
     )[0]['summary_text']
+
 
 
 
@@ -103,3 +127,14 @@ def translate_summary(summary, target_lang):
     )
     
     return translation_tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+
+from app.backend.visualizer import VisualSummarizer
+
+visualizer = VisualSummarizer()
+
+def generate_mindmap(transcript):
+    try:
+        return visualizer.create_mindmap(transcript)
+    except Exception as e:
+        return f"Mindmap generation failed: {str(e)}"
+

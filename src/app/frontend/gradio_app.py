@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from app.backend.agent import generate_summary, answer_question, translate_summary
+from app.backend.agent import generate_summary, answer_question, translate_summary, generate_mindmap
 from app.backend.utils import *
 
 css = """
@@ -11,6 +11,8 @@ css = """
 footer {visibility: hidden}
 @import url('https://fonts.boomla.com/bangla.css');
 body {font-family: 'SolaimanLipi', sans-serif!important}
+.dark .summary-box textarea {background-color: #1a1a1a!important}
+.md_output {margin-top: 10px!important}
 """
 
 LANGUAGE_MAPPING = {
@@ -26,7 +28,7 @@ LANGUAGE_MAPPING = {
 }
 
 with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
-    gr.Markdown("# YouTube AI Analyzer 2.0 🚀")
+    gr.Markdown("# YouTube AI Analyzer 3.0 🚀")
     
     with gr.Tab("Video Analysis"):
         with gr.Row():
@@ -34,7 +36,16 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
             summary_output = gr.Textbox(label="Video Summary", lines=5, interactive=False)
         
         with gr.Row():
+            with gr.Column(scale=2):
+                mode_dropdown = gr.Dropdown(
+                    choices=["Short", "Medium", "Detailed"],
+                    value="Medium",
+                    label="Summary Length",
+                    interactive=True
+                )
+        with gr.Row():
             analyze_btn = gr.Button("Analyze Video", variant="primary")
+            vis_output = gr.Image(label="Visual Summary (Mind Map)", show_label=True)
             
         with gr.Accordion("Translation Settings", open=True):
             with gr.Row():
@@ -48,19 +59,22 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
             
             translated_output = gr.Textbox(label="Translated Summary", lines=5, interactive=False)
 
-    def analyze_video_handler(url):
+    def analyze_video_handler(url, mode):
         if not url.startswith("https://www.youtube.com/"):
             raise gr.Error("Invalid YouTube URL format")
         
         try:
             transcript = get_transcript(url)
-            return generate_summary(transcript)
+            summary = generate_summary(transcript, mode.lower())
+            mindmap_path = generate_mindmap(summary)
+            return summary, mindmap_path  # Return both values
         except Exception as e:
-            return f"Analysis failed: {str(e)}\n\nNote: Could not find captions and audio transcription failed."
+            return f"Analysis failed: {str(e)}", None  # Return None for image
+
 
     def translate_handler(summary, target_lang):
-        if not summary:
-            raise gr.Error("Generate a summary first before translating")
+        if not summary or summary.startswith("Analysis failed"):
+            raise gr.Error("Generate a valid summary first")
         
         lang_code = LANGUAGE_MAPPING.get(target_lang, "en_XX")
         try:
@@ -71,8 +85,9 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
     # Event bindings
     analyze_btn.click(
         fn=analyze_video_handler,
-        inputs=url_input,
-        outputs=summary_output
+        inputs=[url_input, mode_dropdown],
+        outputs=[summary_output, vis_output],
+        show_progress="full"
     )
     
     translate_btn.click(
@@ -82,4 +97,4 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
     )
 
 if __name__ == "__main__":
-    app.launch()
+    app.launch(share=True)

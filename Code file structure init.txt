@@ -28,6 +28,7 @@ import os
 from dotenv import load_dotenv
 from transformers import pipeline
 import torch
+import whisper
 
 # Load environment variables
 load_dotenv()
@@ -62,18 +63,37 @@ qa_template = """Answer using video transcript:
 Question: {question}
 Transcript: {transcript}
 """
+WHISPER_MODEL = "base"  # Change to "small", "medium", or "large" as needed
 
-def generate_summary(transcript):
+# Add this function
+def get_whisper_model():
+    return whisper.load_model(WHISPER_MODEL)
+
+
+def generate_summary(transcript, mode="medium"):
+    valid_modes = ["short", "medium", "detailed"]
+    mode = mode.lower()
+    if mode not in valid_modes:
+        mode = "medium"
+    
+    mode_settings = {
+        "short": {"max": 150, "min": 40, "beams": 4},
+        "medium": {"max": 300, "min": 120, "beams": 5},
+        "detailed": {"max": 600, "min": 200, "beams": 6}
+    }
+    
+    config = mode_settings[mode]
+    
     return summarizer(
         transcript,
-        max_length=300,  # Increased from 150
-        min_length=120,   # Increased from 40
-        num_beams=4,      # Better quality generation
-        no_repeat_ngram_size=3,  # Prevent repetition
+        max_length=config["max"],
+        min_length=config["min"],
+        num_beams=config["beams"],
+        no_repeat_ngram_size=3,
         do_sample=False,
-        truncation=True,
-        clean_up_tokenization_spaces=True
+        truncation=True
     )[0]['summary_text']
+
 
 
 
@@ -120,12 +140,23 @@ def translate_summary(summary, target_lang):
     
     return translation_tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
 
+from app.backend.visualizer import VisualSummarizer
+
+visualizer = VisualSummarizer()
+
+def generate_mindmap(transcript):
+    return visualizer.create_mindmap(transcript)
+
 
 utils.py:
 # backend/utils.py (updated)
 from youtube_transcript_api import YouTubeTranscriptApi
 from langdetect import detect, DetectorFactory
 import re
+from pytube import YouTube
+import whisper
+import tempfile
+import os
 
 # For consistent results
 DetectorFactory.seed = 0
@@ -160,11 +191,38 @@ def get_transcript_with_lang(url):
 
 def get_transcript(url):
     try:
+        # First try YouTube captions
         video_id = extract_video_id(url)
         transcript = YouTubeTranscriptApi.get_transcript(video_id)
         return " ".join([entry['text'] for entry in transcript])
+    except:
+        # Fallback to audio transcription
+        try:
+            audio_path = download_audio(url)
+            return transcribe_audio(audio_path)
+        except Exception as e:
+            raise ValueError(f"Both methods failed: {str(e)}")
+
+def download_audio(url):
+    try:
+        yt = YouTube(url)
+        audio_stream = yt.streams.filter(only_audio=True).first()
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        audio_stream.download(filename=temp_file.name)
+        return temp_file.name
     except Exception as e:
-        raise ValueError(f"Failed to get transcript: {str(e)}")
+        raise ValueError(f"Audio download failed: {str(e)}")
+
+def transcribe_audio(audio_path):
+    try:
+        model = whisper.load_model("base")  # Use 'small' or 'medium' for better accuracy
+        result = model.transcribe(audio_path)
+        return result["text"]
+    except Exception as e:
+        raise ValueError(f"Transcription failed: {str(e)}")
+    finally:
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
 
 gradio_app.py:
 import gradio as gr
@@ -180,6 +238,8 @@ css = """
 footer {visibility: hidden}
 @import url('https://fonts.boomla.com/bangla.css');
 body {font-family: 'SolaimanLipi', sans-serif!important}
+.dark .summary-box textarea {background-color: #1a1a1a!important}
+.md_output {margin-top: 10px!important}
 """
 
 LANGUAGE_MAPPING = {
@@ -195,7 +255,7 @@ LANGUAGE_MAPPING = {
 }
 
 with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
-    gr.Markdown("# YouTube AI Analyzer 2.0 🚀")
+    gr.Markdown("# YouTube AI Analyzer 3.0 🚀")
     
     with gr.Tab("Video Analysis"):
         with gr.Row():
@@ -203,7 +263,16 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
             summary_output = gr.Textbox(label="Video Summary", lines=5, interactive=False)
         
         with gr.Row():
+            with gr.Column(scale=2):
+                mode_dropdown = gr.Dropdown(
+                    choices=["Short", "Medium", "Detailed"],
+                    value="Medium",
+                    label="Summary Length",
+                    interactive=True
+                )
+        with gr.Row():
             analyze_btn = gr.Button("Analyze Video", variant="primary")
+            vis_output = gr.Image(label="Visual Summary (Mind Map)", show_label=True)
             
         with gr.Accordion("Translation Settings", open=True):
             with gr.Row():
@@ -217,13 +286,14 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
             
             translated_output = gr.Textbox(label="Translated Summary", lines=5, interactive=False)
 
-    def analyze_video_handler(url):
+    def analyze_video_handler(url, mode):
         if not url.startswith("https://www.youtube.com/"):
             raise gr.Error("Invalid YouTube URL format")
         
         try:
             transcript = get_transcript(url)
-            return generate_summary(transcript)
+            return generate_summary(transcript, mode.lower())
+            mindmap_path = generate_mindmap(summary)
         except Exception as e:
             return f"Analysis failed: {str(e)}"
 
@@ -240,8 +310,8 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
     # Event bindings
     analyze_btn.click(
         fn=analyze_video_handler,
-        inputs=url_input,
-        outputs=summary_output
+        inputs=[url_input, mode_dropdown],
+        outputs=[summary_output, vis_output]
     )
     
     translate_btn.click(
@@ -251,23 +321,36 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
     )
 
 if __name__ == "__main__":
-    app.launch()
+    app.launch(share=True)
 
 
 requirements.txt:
 # requirements.txt
 youtube-transcript-api
-gradio>=4.0
+gradio==4.25.0
 python-dotenv
 openai
 langchain
-transformers
-torch
+transformers>=4.37.0
+torch>=2.2.2
 llama-cpp-python
-accelerate
+accelerate>=0.31.0
 sentencepiece
 protobuf
 langdetect==1.0.9
+pytube==15.0.0
+openai-whisper==20231117
+ffmpeg-python==0.2.0
+keybert>=0.7.0
+sentence-transformers>=2.7.0
+networkx==3.2.1
+matplotlib==3.8.2
+python-louvain==0.16
+huggingface-hub==0.24.0
+gradio_client==0.15.0
+pydantic>=2.5.2
+fastapi>=0.111.0
+
 
 .gitignore: 
 .env
