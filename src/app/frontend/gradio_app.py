@@ -3,8 +3,8 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from app.backend.agent import generate_summary, answer_question
-from app.backend.utils import get_transcript
+from app.backend.agent import generate_summary, answer_question, translate_summary
+from app.backend.utils import *
 
 css = """
 .gradio-container {max-width: 900px!important}
@@ -36,19 +36,18 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
         with gr.Row():
             analyze_btn = gr.Button("Analyze Video", variant="primary")
             
-        with gr.Accordion("Translation Settings", open=True):  # Changed to open=True
+        with gr.Accordion("Translation Settings", open=True):
             with gr.Row():
                 lang_dropdown = gr.Dropdown(
                     choices=list(LANGUAGE_MAPPING.keys()),
                     value="English",
                     label="Target Language",
-                    interactive=True  # Added interactive property
+                    interactive=True
                 )
                 translate_btn = gr.Button("Translate Summary", variant="secondary")
             
             translated_output = gr.Textbox(label="Translated Summary", lines=5, interactive=False)
 
-    # Move function inside Blocks context
     def analyze_video_handler(url):
         if not url.startswith("https://www.youtube.com/"):
             raise gr.Error("Invalid YouTube URL format")
@@ -57,28 +56,25 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
             transcript = get_transcript(url)
             return generate_summary(transcript)
         except Exception as e:
-            return f"Analysis failed: {str(e)}"
+            return f"Analysis failed: {str(e)}\n\nNote: Could not find captions and audio transcription failed."
 
-    # Connect the original button (removed duplicate)
-    analyze_btn.click(
-        fn=analyze_video_handler,
-        inputs=url_input,
-        outputs=summary_output
-    )
     def translate_handler(summary, target_lang):
         if not summary:
             raise gr.Error("Generate a summary first before translating")
         
         lang_code = LANGUAGE_MAPPING.get(target_lang, "en_XX")
         try:
-            from app.backend.agent import translate_summary
             return translate_summary(summary, lang_code)
-        except ImportError:
-            raise gr.Error("Translation module not found")
         except Exception as e:
             return f"Translation failed: {str(e)}"
 
-    # Connect translate button AFTER handler definition
+    # Event bindings
+    analyze_btn.click(
+        fn=analyze_video_handler,
+        inputs=url_input,
+        outputs=summary_output
+    )
+    
     translate_btn.click(
         fn=translate_handler,
         inputs=[summary_output, lang_dropdown],

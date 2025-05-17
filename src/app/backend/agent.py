@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 from transformers import pipeline
 import torch
+import whisper
 
 # Load environment variables
 load_dotenv()
@@ -39,6 +40,12 @@ qa_template = """Answer using video transcript:
 Question: {question}
 Transcript: {transcript}
 """
+WHISPER_MODEL = "base"  # Change to "small", "medium", or "large" as needed
+
+# Add this function
+def get_whisper_model():
+    return whisper.load_model(WHISPER_MODEL)
+
 
 def generate_summary(transcript):
     return summarizer(
