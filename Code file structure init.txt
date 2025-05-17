@@ -152,9 +152,6 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
 if __name__ == "__main__":
     app.launch()
 
-.env:
-OPENAI_API_KEY=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
-MODEL_NAME = "sshleifer/distilbart-cnn-12-6"
 
 requirements.txt:
 # requirements.txt
