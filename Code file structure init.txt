@@ -1,20 +1,24 @@
 Code file structure:
+
+├── Code file structure init.txt
 ├── __init__.py
 ├── README.md
 ├── requirements.txt
 └── src
     └── app
         ├── backend
-        │   ├── agent.py
-        │   ├── __init__.py
-        │   ├── __pycache__
-        │   │   ├── agent.cpython-312.pyc
-        │   │   ├── __init__.cpython-312.pyc
-        │   │   └── utils.cpython-312.pyc
-        │   └── utils.py
+        │   ├── agent.py
+        │   ├── __init__.py
+        │   ├── __pycache__
+        │   │   ├── agent.cpython-312.pyc
+        │   │   ├── __init__.cpython-312.pyc
+        │   │   ├── utils.cpython-312.pyc
+        │   │   └── visualizer.cpython-312.pyc
+        │   ├── utils.py
+        │   └── visualizer.py
         ├── frontend
-        │   ├── gradio_app.py
-        │   └── __init__.py
+        │   ├── gradio_app.py
+        │   └── __init__.py
         ├── __init__.py
         └── __pycache__
             └── __init__.cpython-312.pyc
@@ -22,13 +26,13 @@ Code file structure:
 Here are the codes:
 agent.py:
 # backend/agent.py
-#from openai import OpenAI
-#from langchain.prompts import PromptTemplate
 import os
 from dotenv import load_dotenv
-from transformers import pipeline
+from transformers import pipeline, AutoModelForSeq2SeqLM
 import torch
 import whisper
+from typing import Tuple
+from transformers import pipeline
 
 # Load environment variables
 load_dotenv()
@@ -40,17 +44,18 @@ load_dotenv()
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
-MODEL_NAME = os.getenv("MODEL_NAME")  # or your chosen model
+MODEL_NAME = os.getenv("MODEL_NAME")  
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype="auto", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, model_max_length=1024)
+model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
 summarizer = pipeline(
     "summarization",
     model=MODEL_NAME,
-    tokenizer=MODEL_NAME,
-    device=0 if torch.cuda.is_available() else -1,  # Use GPU if available
+    tokenizer=tokenizer,
+    device=0 if torch.cuda.is_available() else -1,
     framework="pt"
+    # Removed truncation and max_length here
 )
 
 
@@ -69,6 +74,16 @@ WHISPER_MODEL = "base"  # Change to "small", "medium", or "large" as needed
 def get_whisper_model():
     return whisper.load_model(WHISPER_MODEL)
 
+def truncate_text_to_1024_tokens(text, tokenizer):
+    tokens = tokenizer.encode(text, truncation=False)
+    if len(tokens) > 1024:
+        tokens = tokens[:1024]
+    return tokenizer.decode(tokens, skip_special_tokens=True)
+
+def chunk_text(text, max_tokens=1000):
+    tokens = tokenizer.encode(text, truncation=False)
+    chunks = [tokens[i:i+max_tokens] for i in range(0, len(tokens), max_tokens)]
+    return [tokenizer.decode(chunk) for chunk in chunks]
 
 def generate_summary(transcript, mode="medium"):
     valid_modes = ["short", "medium", "detailed"]
@@ -83,9 +98,10 @@ def generate_summary(transcript, mode="medium"):
     }
     
     config = mode_settings[mode]
+    truncated_transcript = truncate_text_to_1024_tokens(transcript, tokenizer)
     
     return summarizer(
-        transcript,
+        truncated_transcript,
         max_length=config["max"],
         min_length=config["min"],
         num_beams=config["beams"],
@@ -93,8 +109,6 @@ def generate_summary(transcript, mode="medium"):
         do_sample=False,
         truncation=True
     )[0]['summary_text']
-
-
 
 
 qa_pipeline = pipeline(
@@ -145,7 +159,75 @@ from app.backend.visualizer import VisualSummarizer
 visualizer = VisualSummarizer()
 
 def generate_mindmap(transcript):
-    return visualizer.create_mindmap(transcript)
+    try:
+        return visualizer.create_mindmap(transcript)
+    except Exception as e:
+        return f"Mindmap generation failed: {str(e)}"
+
+
+visualizer.py:
+from keybert import KeyBERT
+from sentence_transformers import SentenceTransformer
+import networkx as nx
+import matplotlib.pyplot as plt
+import community.community_louvain as cl
+from transformers import pipeline
+import tempfile
+import os
+
+class VisualSummarizer:
+    def __init__(self):
+        self.kw_model = KeyBERT(model=SentenceTransformer("all-MiniLM-L6-v2"))
+        self.ner_pipeline = pipeline("ner", aggregation_strategy="simple")
+
+    def create_mindmap(self, text, max_nodes=15):
+        keywords = self._extract_keywords(text)
+        filtered_keys = self._filter_keywords(keywords, max_nodes)
+        graph = self._build_graph(filtered_keys, text)
+        return self._visualize_graph(graph)
+
+    def _extract_keywords(self, text):
+        kw_results = self.kw_model.extract_keywords(
+            text, 
+            keyphrase_ngram_range=(1, 2),
+            stop_words='english',
+            top_n=20
+        )
+        ner_results = self.ner_pipeline(text)
+        combined = {kw[0]: kw[1] for kw in kw_results}
+        for entity in ner_results:
+            combined[entity['word']] = entity['score']
+        return combined
+
+    def _filter_keywords(self, keywords, max_nodes):
+        sorted_keys = sorted(keywords.items(), key=lambda x: x[1], reverse=True)
+        return [k[0] for k in sorted_keys[:max_nodes]]
+
+    def _build_graph(self, keywords, text):
+        G = nx.Graph()
+        text_lower = text.lower()
+        for kw in keywords:
+            G.add_node(kw)
+        for i, kw1 in enumerate(keywords):
+            for kw2 in keywords[i+1:]:
+                if f' {kw1.lower()} ' in text_lower and f' {kw2.lower()} ' in text_lower:
+                    G.add_edge(kw1, kw2)
+        return G
+
+    def _visualize_graph(self, graph):
+        plt.figure(figsize=(12, 8))
+        if len(graph.nodes) > 0:
+            partition = cl.best_partition(graph)
+            pos = nx.spring_layout(graph, k=0.5)
+            nx.draw_networkx_nodes(graph, pos, node_size=2500, cmap=plt.cm.RdYlBu, 
+                                node_color=list(partition.values()))
+            nx.draw_networkx_edges(graph, pos, alpha=0.5)
+            nx.draw_networkx_labels(graph, pos, font_size=9, font_family='sans-serif')
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        plt.savefig(temp_file.name, bbox_inches='tight')
+        plt.close()
+        return temp_file.name
+
 
 
 utils.py:
@@ -230,8 +312,25 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from app.backend.agent import generate_summary, answer_question, translate_summary
+from app.backend.agent import generate_summary, answer_question, translate_summary, generate_mindmap
 from app.backend.utils import *
+
+custom_theme = gr.themes.Default(
+    primary_hue="blue",
+    secondary_hue="slate",
+    neutral_hue="gray"
+).set(
+    body_background_fill="white",
+    block_background_fill="white",
+    # Changed text color parameter:
+    body_text_color="black",
+    button_primary_background_fill="#000000",
+    button_primary_text_color="white",
+    button_primary_background_fill_hover="#1a1a1a",
+    block_label_background_fill="#000000",
+    block_label_text_color="white"
+)
+
 
 css = """
 .gradio-container {max-width: 900px!important}
@@ -254,7 +353,7 @@ LANGUAGE_MAPPING = {
     "Bengali": "bn_IN"
 }
 
-with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
+with gr.Blocks(theme=custom_theme, css=css) as app:
     gr.Markdown("# YouTube AI Analyzer 3.0 🚀")
     
     with gr.Tab("Video Analysis"):
@@ -292,14 +391,16 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
         
         try:
             transcript = get_transcript(url)
-            return generate_summary(transcript, mode.lower())
+            summary = generate_summary(transcript, mode.lower())
             mindmap_path = generate_mindmap(summary)
+            return summary, mindmap_path  # Return both values
         except Exception as e:
-            return f"Analysis failed: {str(e)}"
+            return f"Analysis failed: {str(e)}", None  # Return None for image
+
 
     def translate_handler(summary, target_lang):
-        if not summary:
-            raise gr.Error("Generate a summary first before translating")
+        if not summary or summary.startswith("Analysis failed"):
+            raise gr.Error("Generate a valid summary first")
         
         lang_code = LANGUAGE_MAPPING.get(target_lang, "en_XX")
         try:
@@ -311,7 +412,8 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
     analyze_btn.click(
         fn=analyze_video_handler,
         inputs=[url_input, mode_dropdown],
-        outputs=[summary_output, vis_output]
+        outputs=[summary_output, vis_output],
+        show_progress="full"
     )
     
     translate_btn.click(
@@ -321,19 +423,16 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
     )
 
 if __name__ == "__main__":
-    app.launch(share=True)
+    app.launch()
 
 
 requirements.txt:
-# requirements.txt
+# Keep only these core dependencies
 youtube-transcript-api
-gradio==4.25.0
-python-dotenv
-openai
-langchain
+setuptools>=68.0.0
+gradio>=4.25.0
 transformers>=4.37.0
 torch>=2.2.2
-llama-cpp-python
 accelerate>=0.31.0
 sentencepiece
 protobuf
@@ -341,15 +440,12 @@ langdetect==1.0.9
 pytube==15.0.0
 openai-whisper==20231117
 ffmpeg-python==0.2.0
-keybert>=0.7.0
-sentence-transformers>=2.7.0
+keybert==0.7.0
+sentence-transformers==2.7.0
 networkx==3.2.1
 matplotlib==3.8.2
 python-louvain==0.16
-huggingface-hub==0.24.0
-gradio_client==0.15.0
-pydantic>=2.5.2
-fastapi>=0.111.0
+python-dotenv
 
 
 .gitignore: 
@@ -358,6 +454,7 @@ venv/
 __pycache__/
 *.pyc
 .venv
+
 
 
 

@@ -1,9 +1,7 @@
 # backend/agent.py
-#from openai import OpenAI
-#from langchain.prompts import PromptTemplate
 import os
 from dotenv import load_dotenv
-from transformers import pipeline
+from transformers import pipeline, AutoModelForSeq2SeqLM
 import torch
 import whisper
 from typing import Tuple
@@ -19,21 +17,18 @@ load_dotenv()
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
-MODEL_NAME = os.getenv("MODEL_NAME")  # or your chosen model
+MODEL_NAME = os.getenv("MODEL_NAME")  
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype="auto", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, model_max_length=1024)
+model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
 summarizer = pipeline(
     "summarization",
     model=MODEL_NAME,
-    tokenizer=MODEL_NAME,
-    device=0 if torch.cuda.is_available() else -1,  # Use GPU if available
-    framework="pt",
-    truncation=True,  # Force truncation
-    max_length=1024,  # BART's max input length
-    min_length=100,
-    num_beams=4
+    tokenizer=tokenizer,
+    device=0 if torch.cuda.is_available() else -1,
+    framework="pt"
+    # Removed truncation and max_length here
 )
 
 
@@ -52,6 +47,11 @@ WHISPER_MODEL = "base"  # Change to "small", "medium", or "large" as needed
 def get_whisper_model():
     return whisper.load_model(WHISPER_MODEL)
 
+def truncate_text_to_1024_tokens(text, tokenizer):
+    tokens = tokenizer.encode(text, truncation=False)
+    if len(tokens) > 1024:
+        tokens = tokens[:1024]
+    return tokenizer.decode(tokens, skip_special_tokens=True)
 
 def chunk_text(text, max_tokens=1000):
     tokens = tokenizer.encode(text, truncation=False)
@@ -71,9 +71,10 @@ def generate_summary(transcript, mode="medium"):
     }
     
     config = mode_settings[mode]
+    truncated_transcript = truncate_text_to_1024_tokens(transcript, tokenizer)
     
     return summarizer(
-        transcript,
+        truncated_transcript,
         max_length=config["max"],
         min_length=config["min"],
         num_beams=config["beams"],

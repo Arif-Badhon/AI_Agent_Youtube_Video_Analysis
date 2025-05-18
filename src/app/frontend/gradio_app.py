@@ -6,6 +6,23 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from app.backend.agent import generate_summary, answer_question, translate_summary, generate_mindmap
 from app.backend.utils import *
 
+custom_theme = gr.themes.Default(
+    primary_hue="blue",
+    secondary_hue="slate",
+    neutral_hue="gray"
+).set(
+    body_background_fill="white",
+    block_background_fill="white",
+    button_primary_background_fill="#000000",
+    button_primary_text_color="white",
+    button_primary_background_fill_hover="#1a1a1a",
+    block_label_background_fill="#000000",
+    block_label_text_color="white",
+    # Valid text color parameter:
+    body_text_color_subdued="black"
+)
+
+
 css = """
 .gradio-container {max-width: 900px!important}
 footer {visibility: hidden}
@@ -27,7 +44,7 @@ LANGUAGE_MAPPING = {
     "Bengali": "bn_IN"
 }
 
-with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
+with gr.Blocks(theme=custom_theme, css=css) as app:
     gr.Markdown("# YouTube AI Analyzer 3.0 🚀")
     
     with gr.Tab("Video Analysis"):
@@ -97,4 +114,4 @@ with gr.Blocks(theme=gr.themes.Soft(), css=css) as app:
     )
 
 if __name__ == "__main__":
-    app.launch(share=True)
+    app.launch()

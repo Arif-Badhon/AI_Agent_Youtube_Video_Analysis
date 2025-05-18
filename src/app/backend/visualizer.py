@@ -10,7 +10,11 @@ import os
 class VisualSummarizer:
     def __init__(self):
         self.kw_model = KeyBERT(model=SentenceTransformer("all-MiniLM-L6-v2"))
-        self.ner_pipeline = pipeline("ner", aggregation_strategy="simple")
+        self.ner_pipeline = pipeline(
+            "ner",
+            model="dslim/bert-base-NER",
+            aggregation_strategy="simple"
+        )
 
     def create_mindmap(self, text, max_nodes=15):
         keywords = self._extract_keywords(text)
