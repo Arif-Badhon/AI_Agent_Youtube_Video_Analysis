@@ -11,6 +11,7 @@ import numpy as np
 import re
 import networkx as nx
 import matplotlib.pyplot as plt
+import torch
 
 class QAAgent:
     def __init__(self):
@@ -40,28 +41,26 @@ class QAAgent:
         }
 
     def chunk_text(self, text, chunk_size=500):
-        """Improved context-preserving chunking"""
-        paragraphs = re.split(r'\n+', text)
+        """Enhanced chunking with overlap"""
+        words = text.split()
         chunks = []
         current_chunk = []
         current_length = 0
         
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-                
-            para_length = len(para.split())
-            if current_length + para_length <= chunk_size:
-                current_chunk.append(para)
-                current_length += para_length
-            else:
-                chunks.append('\n'.join(current_chunk))
-                current_chunk = [para]
-                current_length = para_length
+        for i in range(len(words)):
+            current_chunk.append(words[i])
+            current_length += 1
+            
+            if current_length >= chunk_size:
+                chunks.append(' '.join(current_chunk))
+                # Keep 20% overlap
+                current_chunk = current_chunk[-int(chunk_size*0.2):]
+                current_length = len(current_chunk)
+        
         if current_chunk:
-            chunks.append('\n'.join(current_chunk))
+            chunks.append(' '.join(current_chunk))
         return chunks
+
 
     def process_transcript(self, url, transcript):
         video_id = url.split("v=")[-1]
@@ -81,8 +80,13 @@ class QAAgent:
         question_embed = self.embedder.encode([question])
         
         similarities = cosine_similarity(question_embed, data['embeddings'])[0]
-        top_k = min(5, len(similarities))  # Dynamic chunk selection
-        top_idxs = np.argpartition(similarities, -top_k)[-top_k:]
+        
+        # Handle case with few chunks
+        valid_k = min(3, len(similarities))
+        if valid_k == 0:
+            return "❌ Not enough context to answer this question"
+            
+        top_idxs = np.argsort(similarities)[-valid_k:]  # Use argsort instead of argpartition
         context = " ".join([data['chunks'][i] for i in top_idxs])
         
         result = self.qa_model(
@@ -92,9 +96,10 @@ class QAAgent:
             handle_impossible_answer=True
         )
         
-        if result['answer'] == "" or result['score'] < 0.1:
+        if result['answer'] == "" or result['score'] < 0.15:  # Slightly lower threshold
             return "🔍 This information isn't clearly covered in the video."
         return f"{result['answer']} (Confidence: {result['score']:.0%})"
+
 
     def translate_text(self, text, target_lang):
         if target_lang not in self.lang_map:
@@ -108,9 +113,50 @@ class QAAgent:
         )
         return self.trans_tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
 
+summarizer = pipeline(
+    "summarization", 
+    model="facebook/bart-large-cnn",
+    device=0 if torch.cuda.is_available() else -1
+)
+def chunk_text(text, max_tokens=900):
+    """Split text into roughly max_tokens word chunks."""
+    words = text.split()
+    for i in range(0, len(words), max_tokens):
+        yield " ".join(words[i:i+max_tokens])
+
 def generate_summary(transcript, mode):
-    """Your summary logic (replace with actual implementation)"""
-    return f"{mode.capitalize()} summary: {transcript[:500]}..."
+    # Set summary lengths based on mode
+    if mode.lower() == "short":
+        max_length, min_length = 60, 20
+    elif mode.lower() == "medium":
+        max_length, min_length = 120, 40
+    else:  # detailed
+        max_length, min_length = 200, 60
+
+    # Always chunk transcript if too long
+    summaries = []
+    for chunk in chunk_text(transcript, max_tokens=900):  # 900 is safe for BART
+        summary = summarizer(
+            chunk,
+            max_length=max_length,
+            min_length=min_length,
+            do_sample=False,
+            truncation=True
+        )[0]['summary_text']
+        summaries.append(summary)
+    # If multiple chunks, summarize the summaries
+    if len(summaries) > 1:
+        combined = " ".join(summaries)
+        final_summary = summarizer(
+            combined,
+            max_length=max_length,
+            min_length=min_length,
+            do_sample=False,
+            truncation=True
+        )[0]['summary_text']
+        return final_summary
+    else:
+        return summaries[0]
 
 def generate_mindmap(summary):
     """Generate mindmap visualization"""

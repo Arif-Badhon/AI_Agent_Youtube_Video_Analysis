@@ -54,8 +54,13 @@ def analyze_video(url, mode):
     try:
         transcript = get_transcript(url)
         qa_agent.process_transcript(url, transcript)
+        
+        if not transcript:
+            raise ValueError("Transcript is empty")
+            
         summary = generate_summary(transcript, mode)
         mindmap = generate_mindmap(summary)
+        
         return (
             f"### {mode.capitalize()} Summary\n\n{summary}",
             mindmap,
@@ -74,9 +79,16 @@ def handle_translation(summary, lang):
 def handle_qa(history, url, question):
     try:
         answer = qa_agent.answer_question(url, question)
-        return history + [[question, answer]]
+        return history + [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": answer}
+        ]
     except Exception as e:
-        return history + [[question, f"⚠️ Error: {str(e)}"]]
+        return history + [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": f"⚠️ Error: {str(e)}"}
+        ]
+
 
 # ========== Interface ==========
 with gr.Blocks(theme=custom_theme, css=css) as app:
@@ -129,11 +141,12 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
         with gr.Accordion("💬 AI-Powered Q&A", open=False):
             qa_chat = gr.Chatbot(
                 height=400,
-                bubble_full_width=False,
                 avatar_images=(
                     "https://i.imgur.com/7kQEsHU.png",  # User avatar
                     "https://i.imgur.com/8EeSUQ3.png"   # Bot avatar
-                )
+                ),
+                show_label=False,
+                type="messages"  # New format required
             )
             with gr.Row():
                 qa_input = gr.Textbox(
