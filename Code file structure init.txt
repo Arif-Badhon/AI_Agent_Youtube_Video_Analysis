@@ -1,5 +1,6 @@
 Code file structure:
 
+.
 ├── Code file structure init.txt
 ├── __init__.py
 ├── README.md
@@ -23,8 +24,12 @@ Code file structure:
         └── __pycache__
             └── __init__.cpython-312.pyc
 
+
 Here are the codes:
-agent.py:
+
+File src > app > backend > __init__.py:
+
+File src > app > backend > agent.py:
 # backend/agent.py
 import os
 from dotenv import load_dotenv
@@ -111,6 +116,8 @@ def generate_summary(transcript, mode="medium"):
     )[0]['summary_text']
 
 
+
+
 qa_pipeline = pipeline(
     "question-answering",
     model="deepset/roberta-base-squad2"
@@ -165,72 +172,7 @@ def generate_mindmap(transcript):
         return f"Mindmap generation failed: {str(e)}"
 
 
-visualizer.py:
-from keybert import KeyBERT
-from sentence_transformers import SentenceTransformer
-import networkx as nx
-import matplotlib.pyplot as plt
-import community.community_louvain as cl
-from transformers import pipeline
-import tempfile
-import os
-
-class VisualSummarizer:
-    def __init__(self):
-        self.kw_model = KeyBERT(model=SentenceTransformer("all-MiniLM-L6-v2"))
-        self.ner_pipeline = pipeline("ner", aggregation_strategy="simple")
-
-    def create_mindmap(self, text, max_nodes=15):
-        keywords = self._extract_keywords(text)
-        filtered_keys = self._filter_keywords(keywords, max_nodes)
-        graph = self._build_graph(filtered_keys, text)
-        return self._visualize_graph(graph)
-
-    def _extract_keywords(self, text):
-        kw_results = self.kw_model.extract_keywords(
-            text, 
-            keyphrase_ngram_range=(1, 2),
-            stop_words='english',
-            top_n=20
-        )
-        ner_results = self.ner_pipeline(text)
-        combined = {kw[0]: kw[1] for kw in kw_results}
-        for entity in ner_results:
-            combined[entity['word']] = entity['score']
-        return combined
-
-    def _filter_keywords(self, keywords, max_nodes):
-        sorted_keys = sorted(keywords.items(), key=lambda x: x[1], reverse=True)
-        return [k[0] for k in sorted_keys[:max_nodes]]
-
-    def _build_graph(self, keywords, text):
-        G = nx.Graph()
-        text_lower = text.lower()
-        for kw in keywords:
-            G.add_node(kw)
-        for i, kw1 in enumerate(keywords):
-            for kw2 in keywords[i+1:]:
-                if f' {kw1.lower()} ' in text_lower and f' {kw2.lower()} ' in text_lower:
-                    G.add_edge(kw1, kw2)
-        return G
-
-    def _visualize_graph(self, graph):
-        plt.figure(figsize=(12, 8))
-        if len(graph.nodes) > 0:
-            partition = cl.best_partition(graph)
-            pos = nx.spring_layout(graph, k=0.5)
-            nx.draw_networkx_nodes(graph, pos, node_size=2500, cmap=plt.cm.RdYlBu, 
-                                node_color=list(partition.values()))
-            nx.draw_networkx_edges(graph, pos, alpha=0.5)
-            nx.draw_networkx_labels(graph, pos, font_size=9, font_family='sans-serif')
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        plt.savefig(temp_file.name, bbox_inches='tight')
-        plt.close()
-        return temp_file.name
-
-
-
-utils.py:
+File src > app > backend > utils.py:
 # backend/utils.py (updated)
 from youtube_transcript_api import YouTubeTranscriptApi
 from langdetect import detect, DetectorFactory
@@ -306,7 +248,79 @@ def transcribe_audio(audio_path):
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
-gradio_app.py:
+
+File src > app > backend > visualizer.py:
+from keybert import KeyBERT
+from sentence_transformers import SentenceTransformer
+import networkx as nx
+import matplotlib.pyplot as plt
+import community.community_louvain as cl
+from transformers import pipeline
+import tempfile
+import os
+
+class VisualSummarizer:
+    def __init__(self):
+        self.kw_model = KeyBERT(model=SentenceTransformer("all-MiniLM-L6-v2"))
+        self.ner_pipeline = pipeline(
+            "ner",
+            model="dslim/bert-base-NER",
+            aggregation_strategy="simple"
+        )
+
+    def create_mindmap(self, text, max_nodes=15):
+        keywords = self._extract_keywords(text)
+        filtered_keys = self._filter_keywords(keywords, max_nodes)
+        graph = self._build_graph(filtered_keys, text)
+        return self._visualize_graph(graph)
+
+    def _extract_keywords(self, text):
+        kw_results = self.kw_model.extract_keywords(
+            text, 
+            keyphrase_ngram_range=(1, 2),
+            stop_words='english',
+            top_n=20
+        )
+        ner_results = self.ner_pipeline(text)
+        combined = {kw[0]: kw[1] for kw in kw_results}
+        for entity in ner_results:
+            combined[entity['word']] = entity['score']
+        return combined
+
+    def _filter_keywords(self, keywords, max_nodes):
+        sorted_keys = sorted(keywords.items(), key=lambda x: x[1], reverse=True)
+        return [k[0] for k in sorted_keys[:max_nodes]]
+
+    def _build_graph(self, keywords, text):
+        G = nx.Graph()
+        text_lower = text.lower()
+        for kw in keywords:
+            G.add_node(kw)
+        for i, kw1 in enumerate(keywords):
+            for kw2 in keywords[i+1:]:
+                if f' {kw1.lower()} ' in text_lower and f' {kw2.lower()} ' in text_lower:
+                    G.add_edge(kw1, kw2)
+        return G
+
+    def _visualize_graph(self, graph):
+        plt.figure(figsize=(12, 8))
+        if len(graph.nodes) > 0:
+            partition = cl.best_partition(graph)
+            pos = nx.spring_layout(graph, k=0.5)
+            nx.draw_networkx_nodes(graph, pos, node_size=2500, cmap=plt.cm.RdYlBu, 
+                                node_color=list(partition.values()))
+            nx.draw_networkx_edges(graph, pos, alpha=0.5)
+            nx.draw_networkx_labels(graph, pos, font_size=9, font_family='sans-serif')
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        plt.savefig(temp_file.name, bbox_inches='tight')
+        plt.close()
+        return temp_file.name
+
+
+File src > app > frontend > __init__.py:
+
+
+File src > app > frontend > gradio_app.py:
 import gradio as gr
 import sys
 import os
@@ -322,13 +336,13 @@ custom_theme = gr.themes.Default(
 ).set(
     body_background_fill="white",
     block_background_fill="white",
-    # Changed text color parameter:
-    body_text_color="black",
     button_primary_background_fill="#000000",
     button_primary_text_color="white",
     button_primary_background_fill_hover="#1a1a1a",
     block_label_background_fill="#000000",
-    block_label_text_color="white"
+    block_label_text_color="white",
+    # Valid text color parameter:
+    body_text_color_subdued="black"
 )
 
 
@@ -426,7 +440,17 @@ if __name__ == "__main__":
     app.launch()
 
 
-requirements.txt:
+File src > app > __init__.py:
+
+File __init__.py:
+
+File .env:
+OPENAI_API_KEY=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
+#MODEL_NAME = "sshleifer/distilbart-cnn-12-6"
+MODEL_NAME = "facebook/bart-large-cnn"
+ALLOWED_DOMAINS=www.youtube.com,youtu.be
+
+File requirements.txt:
 # Keep only these core dependencies
 youtube-transcript-api
 setuptools>=68.0.0
@@ -446,15 +470,5 @@ networkx==3.2.1
 matplotlib==3.8.2
 python-louvain==0.16
 python-dotenv
-
-
-.gitignore: 
-.env
-venv/
-__pycache__/
-*.pyc
-.venv
-
-
 
 
