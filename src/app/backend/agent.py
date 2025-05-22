@@ -1,141 +1,136 @@
-# backend/agent.py
-import os
-from dotenv import load_dotenv
-from transformers import pipeline, AutoModelForSeq2SeqLM
-import torch
-import whisper
-from typing import Tuple
-from transformers import pipeline
-
-# Load environment variables
-load_dotenv()
-
-#client = OpenAI(OPENAI_API_KEY=os.getenv("OPENAI_API_KEY"))
-
-#client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-
-MODEL_NAME = os.getenv("MODEL_NAME")  
-
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, model_max_length=1024)
-model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
-
-summarizer = pipeline(
-    "summarization",
-    model=MODEL_NAME,
-    tokenizer=tokenizer,
-    device=0 if torch.cuda.is_available() else -1,
-    framework="pt"
-    # Removed truncation and max_length here
+from transformers import (
+    AutoModelForQuestionAnswering,
+    AutoTokenizer,
+    MBart50TokenizerFast,
+    MBartForConditionalGeneration,
+    pipeline
 )
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import re
+import networkx as nx
+import matplotlib.pyplot as plt
 
+class QAAgent:
+    def __init__(self):
+        # QA System
+        self.embedder = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+        qa_model = AutoModelForQuestionAnswering.from_pretrained("deepset/roberta-large-squad2")
+        qa_tokenizer = AutoTokenizer.from_pretrained("deepset/roberta-large-squad2")
+        self.qa_model = pipeline(
+            "question-answering",
+            model=qa_model,
+            tokenizer=qa_tokenizer
+        )
+        self.cache = {}
 
+        # Translation System
+        self.translator = MBartForConditionalGeneration.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
+        self.trans_tokenizer = MBart50TokenizerFast.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
+        self.lang_map = {
+            "English": "en_XX",
+            "Bengali": "bn_IN",
+            "Hindi": "hi_IN",
+            "Chinese": "zh_CN",
+            "Spanish": "es_XX",
+            "French": "fr_XX",
+            "Arabic": "ar_AR",
+            "Russian": "ru_RU"
+        }
 
-summary_template = """Generate concise video summary with timestamps:
-{transcript}
-"""
+    def chunk_text(self, text, chunk_size=500):
+        """Improved context-preserving chunking"""
+        paragraphs = re.split(r'\n+', text)
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+                
+            para_length = len(para.split())
+            if current_length + para_length <= chunk_size:
+                current_chunk.append(para)
+                current_length += para_length
+            else:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = [para]
+                current_length = para_length
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        return chunks
 
-qa_template = """Answer using video transcript:
-Question: {question}
-Transcript: {transcript}
-"""
-WHISPER_MODEL = "base"  # Change to "small", "medium", or "large" as needed
+    def process_transcript(self, url, transcript):
+        video_id = url.split("v=")[-1]
+        if video_id not in self.cache:
+            chunks = self.chunk_text(transcript)
+            self.cache[video_id] = {
+                'chunks': chunks,
+                'embeddings': self.embedder.encode(chunks)
+            }
 
-# Add this function
-def get_whisper_model():
-    return whisper.load_model(WHISPER_MODEL)
+    def answer_question(self, url, question):
+        video_id = url.split("v=")[-1]
+        if video_id not in self.cache:
+            raise ValueError("Process transcript first")
+            
+        data = self.cache[video_id]
+        question_embed = self.embedder.encode([question])
+        
+        similarities = cosine_similarity(question_embed, data['embeddings'])[0]
+        top_k = min(5, len(similarities))  # Dynamic chunk selection
+        top_idxs = np.argpartition(similarities, -top_k)[-top_k:]
+        context = " ".join([data['chunks'][i] for i in top_idxs])
+        
+        result = self.qa_model(
+            question=question,
+            context=context,
+            max_answer_len=150,
+            handle_impossible_answer=True
+        )
+        
+        if result['answer'] == "" or result['score'] < 0.1:
+            return "🔍 This information isn't clearly covered in the video."
+        return f"{result['answer']} (Confidence: {result['score']:.0%})"
 
-def truncate_text_to_1024_tokens(text, tokenizer):
-    tokens = tokenizer.encode(text, truncation=False)
-    if len(tokens) > 1024:
-        tokens = tokens[:1024]
-    return tokenizer.decode(tokens, skip_special_tokens=True)
+    def translate_text(self, text, target_lang):
+        if target_lang not in self.lang_map:
+            raise ValueError(f"Unsupported language: {target_lang}")
+            
+        self.trans_tokenizer.src_lang = "en_XX"
+        encoded = self.trans_tokenizer(text, return_tensors="pt")
+        generated_tokens = self.translator.generate(
+            **encoded,
+            forced_bos_token_id=self.trans_tokenizer.lang_code_to_id[self.lang_map[target_lang]]
+        )
+        return self.trans_tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
 
-def chunk_text(text, max_tokens=1000):
-    tokens = tokenizer.encode(text, truncation=False)
-    chunks = [tokens[i:i+max_tokens] for i in range(0, len(tokens), max_tokens)]
-    return [tokenizer.decode(chunk) for chunk in chunks]
+def generate_summary(transcript, mode):
+    """Your summary logic (replace with actual implementation)"""
+    return f"{mode.capitalize()} summary: {transcript[:500]}..."
 
-def generate_summary(transcript, mode="medium"):
-    valid_modes = ["short", "medium", "detailed"]
-    mode = mode.lower()
-    if mode not in valid_modes:
-        mode = "medium"
+def generate_mindmap(summary):
+    """Generate mindmap visualization"""
+    words = [word for word in summary.split() if len(word) > 3][:15]
+    G = nx.Graph()
+    for i, word in enumerate(words):
+        G.add_node(word)
+        if i > 0:
+            G.add_edge(words[i-1], word)
     
-    mode_settings = {
-        "short": {"max": 150, "min": 40, "beams": 4},
-        "medium": {"max": 300, "min": 120, "beams": 5},
-        "detailed": {"max": 600, "min": 200, "beams": 6}
-    }
-    
-    config = mode_settings[mode]
-    truncated_transcript = truncate_text_to_1024_tokens(transcript, tokenizer)
-    
-    return summarizer(
-        truncated_transcript,
-        max_length=config["max"],
-        min_length=config["min"],
-        num_beams=config["beams"],
-        no_repeat_ngram_size=3,
-        do_sample=False,
-        truncation=True
-    )[0]['summary_text']
-
-
-
-
-qa_pipeline = pipeline(
-    "question-answering",
-    model="deepset/roberta-base-squad2"
-)
-
-def answer_question(transcript, question):
-    return qa_pipeline(
-        question=question,
-        context=transcript[:1024]  # Model's max context
-    )['answer']
-
-
-# agent.py - Add translation functionality
-from transformers import MBart50TokenizerFast, MBartForConditionalGeneration
-
-translation_model = MBartForConditionalGeneration.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
-translation_tokenizer = MBart50TokenizerFast.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
-
-LANGUAGE_MAPPING = {
-    "French": "fr_XX",
-    "Spanish": "es_XX",
-    "German": "de_DE",
-    "Chinese": "zh_CN",
-    "Hindi": "hi_IN",
-    "Bengali": "bn_IN"
-}
-
-def translate_summary(summary, target_lang):
-    translation_tokenizer.src_lang = "en_XX"
-    inputs = translation_tokenizer(
-        summary, 
-        return_tensors="pt", 
-        truncation=True, 
-        max_length=1024
+    plt.figure(figsize=(16, 10))
+    pos = nx.spring_layout(G, k=0.5)
+    nx.draw(
+        G, pos, with_labels=True, 
+        node_size=2500, node_color="skyblue",
+        font_size=10, font_weight="bold",
+        edge_color="gray"
     )
-    
-    generated_tokens = translation_model.generate(
-        **inputs,
-        forced_bos_token_id=translation_tokenizer.lang_code_to_id[target_lang]
-    )
-    
-    return translation_tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+    plt.savefig("mindmap.png", bbox_inches="tight")
+    plt.close()
+    return "mindmap.png"
 
-from app.backend.visualizer import VisualSummarizer
-
-visualizer = VisualSummarizer()
-
-def generate_mindmap(transcript):
-    try:
-        return visualizer.create_mindmap(transcript)
-    except Exception as e:
-        return f"Mindmap generation failed: {str(e)}"
-
+qa_agent = QAAgent()

@@ -3,195 +3,183 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from app.backend.agent import generate_summary, answer_question, translate_summary, generate_mindmap
-from app.backend.utils import *
+from app.backend.agent import generate_summary, generate_mindmap, qa_agent
+from app.backend.utils import get_transcript
 
+# ========== Theme & CSS ==========
 custom_theme = gr.themes.Default(
     primary_hue="blue",
-    secondary_hue="slate",
-    neutral_hue="gray"
+    secondary_hue="slate"
 ).set(
-    body_background_fill="white",
-    block_background_fill="white",
-    button_primary_background_fill="#000000",
+    button_primary_background_fill="#1976d2",
     button_primary_text_color="white",
-    button_primary_background_fill_hover="#1a1a1a",
-    block_label_background_fill="#000000",
-    block_label_text_color="white",
-    body_text_color_subdued="black"
+    button_primary_background_fill_hover="#1565c0",
 )
 
 css = """
-.gradio-container {
-    max-width: 100vw !important;
-    width: 100vw !important;
-    min-width: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
-}
+.gradio-container {max-width: 100vw!important; margin: 0!important}
 footer {visibility: hidden}
-@import url('https://fonts.boomla.com/bangla.css');
-body {font-family: 'SolaimanLipi', 'Segoe UI', Arial, sans-serif!important;}
 #main-card {
-    background: #fff;
-    border-radius: 18px;
-    box-shadow: 0 4px 28px #0001;
-    padding: 30px 32px 32px 32px;
-    margin-top: 40px;
+    background: white; 
+    border-radius: 16px;
+    box-shadow: 0 4px 24px #0001;
+    padding: 2.4rem;
+    margin: 2rem auto;
     max-width: 900px;
-    margin-left: auto;
-    margin-right: auto;
 }
-.section-title {font-size: 1.2em; font-weight: 600; margin-bottom: 10px; color: #2c3e50;}
 #summary_output, #translated_output {
-    background: #111;
-    color: #fff;
-    border-radius: 10px;
-    padding: 18px;
-    min-height: 120px;
-    font-size: 1.08em;
-    border: 1.5px solid #1976d2;
-    box-shadow: 0 2px 8px #0001;
-    word-break: break-word;
+    background: #000 !important;
+    color: #fff !important;
+    padding: 20px;
+    border-radius: 12px;
+    margin: 15px 0;
 }
-#mindmap_card {background: #f3f7fb; border-radius: 10px; padding: 18px;}
-#detected_lang {font-size: 0.95em; color: #888; margin-bottom: 10px;}
+#mindmap-output img {
+    max-height: 70vh !important;
+    width: 100% !important;
+    object-fit: contain;
+}
 .copy-btn {
     background: #1976d2!important;
-    color: #fff!important;
-    border: none!important;
-    border-radius: 8px!important;
-    padding: 7px 18px!important;
-    margin-left: 8px!important;
-    font-weight: 600!important;
-    font-size: 1em!important;
-    box-shadow: 0 2px 8px #0002;
-    transition: background 0.2s;
+    color: white!important;
+    margin: 10px 0;
 }
-.copy-btn:hover {
+.dark .copy-btn {
     background: #1565c0!important;
 }
-#footer {text-align: center; color: #aaa; margin-top: 38px; font-size: 0.93em;}
-@media (max-width: 600px) {
-  #main-card {padding: 10px;}
-}
 """
 
-LANGUAGE_MAPPING = {
-    "English": "en_XX",
-    "French": "fr_XX",
-    "Spanish": "es_XX", 
-    "German": "de_DE",
-    "Chinese": "zh_CN",
-    "Hindi": "hi_IN",
-    "Arabic": "ar_AR",
-    "Russian": "ru_RU",
-    "Bengali": "bn_IN"
-}
-
-def analyze_video_handler(url, mode):
-    if not (url.startswith("https://www.youtube.com/") or url.startswith("https://youtu.be/")):
-        raise gr.Error("Invalid YouTube URL format")
+# ========== Handlers ==========
+def analyze_video(url, mode):
     try:
         transcript = get_transcript(url)
-        summary = generate_summary(transcript, mode.lower())
-        mindmap_path = generate_mindmap(summary)
-        summary_md = f"### {mode} Summary\n\n" + summary.replace('\n', '\n\n')
-        return summary_md, mindmap_path, ""
+        qa_agent.process_transcript(url, transcript)
+        summary = generate_summary(transcript, mode)
+        mindmap = generate_mindmap(summary)
+        return (
+            f"### {mode.capitalize()} Summary\n\n{summary}",
+            mindmap,
+            ""
+        )
     except Exception as e:
-        return f"**Analysis failed:** {str(e)}", None, ""
+        return f"**Error:** {str(e)}", None, ""
 
-def translate_handler(summary_md, target_lang):
-    import re
-    summary = re.sub(r"^#+.*\n", "", summary_md)
-    if not summary or summary.lower().startswith("**analysis failed"):
-        raise gr.Error("Generate a valid summary first")
-    lang_code = LANGUAGE_MAPPING.get(target_lang, "en_XX")
+def handle_translation(summary, lang):
     try:
-        translated = translate_summary(summary, lang_code)
-        return f"### {target_lang} Translation\n\n{translated.replace(chr(10), chr(10)+chr(10))}"
+        translated = qa_agent.translate_text(summary, lang)
+        return f"### {lang} Translation\n\n{translated}"
     except Exception as e:
-        return f"**Translation failed:** {str(e)}"
+        return f"**Translation Error:** {str(e)}"
 
-copy_js = """
-async (text) => {
-    try {
-        await navigator.clipboard.writeText(text);
-        return "Copied!";
-    } catch (e) {
-        return "Copy failed";
-    }
-}
-"""
+def handle_qa(history, url, question):
+    try:
+        answer = qa_agent.answer_question(url, question)
+        return history + [[question, answer]]
+    except Exception as e:
+        return history + [[question, f"⚠️ Error: {str(e)}"]]
 
+# ========== Interface ==========
 with gr.Blocks(theme=custom_theme, css=css) as app:
-    gr.Markdown("# YouTube AI Analyzer 3.0 🚀")
+    gr.Markdown("# 🎥 YouTube AI Analyzer 6.0")
+    
     with gr.Column(elem_id="main-card"):
-        with gr.Tab("Video Analysis"):
-            gr.Markdown('<div class="section-title">Step 1: Paste YouTube Link</div>')
+        # Input Section
+        with gr.Row():
             url_input = gr.Textbox(
                 label="YouTube URL",
-                placeholder="Paste video URL here...",
-                info="Supports both https://www.youtube.com/ and https://youtu.be/ links."
+                placeholder="Paste video link here...",
+                max_lines=1,
+                scale=4
+            )
+            mode_selector = gr.Radio(
+                choices=["Short", "Medium", "Detailed"],
+                value="Medium",
+                label="Summary Mode",
+                scale=2
+            )
+            analyze_btn = gr.Button("Analyze Video", variant="primary", scale=1)
+        
+        # Summary Section
+        summary_output = gr.Markdown(elem_id="summary_output")
+        copy_summary_btn = gr.Button("📋 Copy Summary", elem_classes="copy-btn")
+        
+        # Translation Section
+        with gr.Accordion("🌍 Translation (Supports 8 Languages)", open=False):
+            with gr.Row():
+                lang_selector = gr.Dropdown(
+                    choices=["English", "Bengali", "Hindi", "Chinese",
+                            "Spanish", "French", "Arabic", "Russian"],
+                    value="English",
+                    label="Target Language",
+                    scale=3
+                )
+                translate_btn = gr.Button("Translate", scale=1)
+            translated_output = gr.Markdown(elem_id="translated_output")
+            copy_translate_btn = gr.Button("📋 Copy Translation", elem_classes="copy-btn")
+        
+        # Mind Map
+        with gr.Accordion("🧠 Interactive Mind Map", open=True):
+            mindmap_output = gr.Image(
+                label="Concept Visualization",
+                elem_id="mindmap-output",
+                show_download_button=True
+            )
+        
+        # Q&A Section
+        with gr.Accordion("💬 AI-Powered Q&A", open=False):
+            qa_chat = gr.Chatbot(
+                height=400,
+                bubble_full_width=False,
+                avatar_images=(
+                    "https://i.imgur.com/7kQEsHU.png",  # User avatar
+                    "https://i.imgur.com/8EeSUQ3.png"   # Bot avatar
+                )
             )
             with gr.Row():
-                mode_dropdown = gr.Radio(
-                    choices=["Short", "Medium", "Detailed"],
-                    value="Medium",
-                    label="Summary Length",
-                    interactive=True
+                qa_input = gr.Textbox(
+                    placeholder="Ask anything about the video...",
+                    show_label=False,
+                    scale=4
                 )
-                analyze_btn = gr.Button("🔍 Analyze Video", variant="primary")
-            with gr.Row():
-                with gr.Column(scale=2):
-                    gr.Markdown('<div class="section-title">Summary</div>')
-                    detected_lang = gr.Markdown("", elem_id="detected_lang")
-                    summary_output = gr.Markdown(elem_id="summary_output")
-                    with gr.Row():
-                        copy_summary_btn = gr.Button("Copy", elem_id="copy_summary", elem_classes="copy-btn")
-                with gr.Column(scale=1):
-                    gr.Markdown('<div class="section-title">Mind Map</div>')
-                    with gr.Column(elem_id="mindmap_card"):
-                        vis_output = gr.Image(
-                            show_label=False,
-                            height=220,
-                            width=320,
-                            show_download_button=True
-                        )
-            with gr.Accordion("🌐 Translate Summary", open=False):
-                with gr.Row():
-                    lang_dropdown = gr.Dropdown(
-                        choices=list(LANGUAGE_MAPPING.keys()),
-                        value="English",
-                        label="Target Language",
-                        interactive=True
-                    )
-                    translate_btn = gr.Button("🌐 Translate")
-                translated_output = gr.Markdown(elem_id="translated_output")
-                with gr.Row():
-                    copy_translated_btn = gr.Button("Copy", elem_id="copy_translated", elem_classes="copy-btn")
-        gr.Markdown(
-            """
-            <div id="footer">
-            <b>Tips:</b> Click "Copy" to copy summaries. Download the mind map for your notes.<br>
-            <i>Powered by Gradio, Transformers, and mBART.</i>
-            </div>
-            """
-        )
+                qa_btn = gr.Button("Ask AI", variant="secondary", scale=1)
 
+    # ========== Event Handling ==========
     analyze_btn.click(
-        fn=analyze_video_handler,
-        inputs=[url_input, mode_dropdown],
-        outputs=[summary_output, vis_output, detected_lang],
-        show_progress="full"
+        analyze_video,
+        inputs=[url_input, mode_selector],
+        outputs=[summary_output, mindmap_output, translated_output]
     )
+    
     translate_btn.click(
-        fn=translate_handler,
-        inputs=[summary_output, lang_dropdown],
+        handle_translation,
+        inputs=[summary_output, lang_selector],
         outputs=translated_output
     )
-    copy_summary_btn.click(None, inputs=summary_output, outputs=None, js=copy_js)
-    copy_translated_btn.click(None, inputs=translated_output, outputs=None, js=copy_js)
+    
+    qa_btn.click(
+        handle_qa,
+        inputs=[qa_chat, url_input, qa_input],
+        outputs=qa_chat
+    )
+    qa_input.submit(
+        handle_qa,
+        inputs=[qa_chat, url_input, qa_input],
+        outputs=qa_chat
+    )
+    
+    # Copy functionality
+    copy_summary_btn.click(
+        None,
+        inputs=summary_output,
+        outputs=None,
+        js="async (text) => { await navigator.clipboard.writeText(text) }"
+    )
+    copy_translate_btn.click(
+        None,
+        inputs=translated_output,
+        outputs=None,
+        js="async (text) => { await navigator.clipboard.writeText(text) }"
+    )
 
 if __name__ == "__main__":
     app.launch()
