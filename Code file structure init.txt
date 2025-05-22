@@ -43,6 +43,7 @@ import numpy as np
 import re
 import networkx as nx
 import matplotlib.pyplot as plt
+import torch
 
 class QAAgent:
     def __init__(self):
@@ -72,28 +73,26 @@ class QAAgent:
         }
 
     def chunk_text(self, text, chunk_size=500):
-        """Improved context-preserving chunking"""
-        paragraphs = re.split(r'\n+', text)
+        """Enhanced chunking with overlap"""
+        words = text.split()
         chunks = []
         current_chunk = []
         current_length = 0
         
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-                
-            para_length = len(para.split())
-            if current_length + para_length <= chunk_size:
-                current_chunk.append(para)
-                current_length += para_length
-            else:
-                chunks.append('\n'.join(current_chunk))
-                current_chunk = [para]
-                current_length = para_length
+        for i in range(len(words)):
+            current_chunk.append(words[i])
+            current_length += 1
+            
+            if current_length >= chunk_size:
+                chunks.append(' '.join(current_chunk))
+                # Keep 20% overlap
+                current_chunk = current_chunk[-int(chunk_size*0.2):]
+                current_length = len(current_chunk)
+        
         if current_chunk:
-            chunks.append('\n'.join(current_chunk))
+            chunks.append(' '.join(current_chunk))
         return chunks
+
 
     def process_transcript(self, url, transcript):
         video_id = url.split("v=")[-1]
@@ -113,8 +112,13 @@ class QAAgent:
         question_embed = self.embedder.encode([question])
         
         similarities = cosine_similarity(question_embed, data['embeddings'])[0]
-        top_k = min(5, len(similarities))  # Dynamic chunk selection
-        top_idxs = np.argpartition(similarities, -top_k)[-top_k:]
+        
+        # Handle case with few chunks
+        valid_k = min(3, len(similarities))
+        if valid_k == 0:
+            return "❌ Not enough context to answer this question"
+            
+        top_idxs = np.argsort(similarities)[-valid_k:]  # Use argsort instead of argpartition
         context = " ".join([data['chunks'][i] for i in top_idxs])
         
         result = self.qa_model(
@@ -124,9 +128,10 @@ class QAAgent:
             handle_impossible_answer=True
         )
         
-        if result['answer'] == "" or result['score'] < 0.1:
+        if result['answer'] == "" or result['score'] < 0.15:  # Slightly lower threshold
             return "🔍 This information isn't clearly covered in the video."
         return f"{result['answer']} (Confidence: {result['score']:.0%})"
+
 
     def translate_text(self, text, target_lang):
         if target_lang not in self.lang_map:
@@ -140,9 +145,50 @@ class QAAgent:
         )
         return self.trans_tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
 
+summarizer = pipeline(
+    "summarization", 
+    model="facebook/bart-large-cnn",
+    device=0 if torch.cuda.is_available() else -1
+)
+def chunk_text(text, max_tokens=900):
+    """Split text into roughly max_tokens word chunks."""
+    words = text.split()
+    for i in range(0, len(words), max_tokens):
+        yield " ".join(words[i:i+max_tokens])
+
 def generate_summary(transcript, mode):
-    """Your summary logic (replace with actual implementation)"""
-    return f"{mode.capitalize()} summary: {transcript[:500]}..."
+    # Set summary lengths based on mode
+    if mode.lower() == "short":
+        max_length, min_length = 60, 20
+    elif mode.lower() == "medium":
+        max_length, min_length = 120, 40
+    else:  # detailed
+        max_length, min_length = 200, 60
+
+    # Always chunk transcript if too long
+    summaries = []
+    for chunk in chunk_text(transcript, max_tokens=900):  # 900 is safe for BART
+        summary = summarizer(
+            chunk,
+            max_length=max_length,
+            min_length=min_length,
+            do_sample=False,
+            truncation=True
+        )[0]['summary_text']
+        summaries.append(summary)
+    # If multiple chunks, summarize the summaries
+    if len(summaries) > 1:
+        combined = " ".join(summaries)
+        final_summary = summarizer(
+            combined,
+            max_length=max_length,
+            min_length=min_length,
+            do_sample=False,
+            truncation=True
+        )[0]['summary_text']
+        return final_summary
+    else:
+        return summaries[0]
 
 def generate_mindmap(summary):
     """Generate mindmap visualization"""
@@ -170,24 +216,39 @@ qa_agent = QAAgent()
 
 File src > app > backend > utils.py:
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
 import re
+import xml.etree.ElementTree as ET
 
 def get_transcript(url):
-    """Fetch and concatenate YouTube video transcript."""
+    """Fetch transcript with robust error handling"""
     video_id = extract_video_id(url)
     try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-        return " ".join([t['text'] for t in transcript_list])
+        # Attempt to fetch transcript with retries
+        for _ in range(3):  # Retry up to 3 times
+            try:
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+                return " ".join([t['text'] for t in transcript_list])
+            except ET.ParseError:
+                continue  # Retry on XML parse error
+        raise Exception("Failed to parse transcript after 3 attempts")
+    except (NoTranscriptFound, TranscriptsDisabled):
+        raise Exception("No English transcript available")
     except Exception as e:
         raise Exception(f"Transcript error: {str(e)}")
 
 def extract_video_id(url):
-    """Extract YouTube video ID from URL."""
-    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
-    matches = re.search(regex, url)
-    if not matches:
-        raise ValueError("Invalid YouTube URL")
-    return matches.group(1)
+    """Improved video ID extraction"""
+    patterns = [
+        r"(?:v=|\/)([0-9A-Za-z_-]{11})",
+        r"youtu\.be\/([0-9A-Za-z_-]{11})"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    raise ValueError("Invalid YouTube URL")
+
 
 
 File src > app > backend > visualizer.py:
@@ -317,8 +378,13 @@ def analyze_video(url, mode):
     try:
         transcript = get_transcript(url)
         qa_agent.process_transcript(url, transcript)
+        
+        if not transcript:
+            raise ValueError("Transcript is empty")
+            
         summary = generate_summary(transcript, mode)
         mindmap = generate_mindmap(summary)
+        
         return (
             f"### {mode.capitalize()} Summary\n\n{summary}",
             mindmap,
@@ -337,9 +403,16 @@ def handle_translation(summary, lang):
 def handle_qa(history, url, question):
     try:
         answer = qa_agent.answer_question(url, question)
-        return history + [[question, answer]]
+        return history + [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": answer}
+        ]
     except Exception as e:
-        return history + [[question, f"⚠️ Error: {str(e)}"]]
+        return history + [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": f"⚠️ Error: {str(e)}"}
+        ]
+
 
 # ========== Interface ==========
 with gr.Blocks(theme=custom_theme, css=css) as app:
@@ -392,11 +465,12 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
         with gr.Accordion("💬 AI-Powered Q&A", open=False):
             qa_chat = gr.Chatbot(
                 height=400,
-                bubble_full_width=False,
                 avatar_images=(
                     "https://i.imgur.com/7kQEsHU.png",  # User avatar
                     "https://i.imgur.com/8EeSUQ3.png"   # Bot avatar
-                )
+                ),
+                show_label=False,
+                type="messages"  # New format required
             )
             with gr.Row():
                 qa_input = gr.Textbox(
@@ -448,6 +522,7 @@ if __name__ == "__main__":
     app.launch()
 
 
+
 File src > app > __init__.py:
 
 File __init__.py:
@@ -468,3 +543,5 @@ torch>=2.0.0
 numpy>=1.24.3
 networkx>=3.1
 matplotlib>=3.7.0
+keybert>=0.7.0
+python-louvain>=0.16
