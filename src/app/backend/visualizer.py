@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import community.community_louvain as cl
 from transformers import pipeline
 import tempfile
-import os
 
 class VisualSummarizer:
     def __init__(self):
