@@ -5,9 +5,8 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from app.backend.agent import generate_summary, generate_mindmap, qa_agent
-from app.backend.utils import get_transcript
+from app.backend.utils import get_transcript, get_video_metadata
 
-# ========== Theme & CSS ==========
 custom_theme = gr.themes.Default(primary_hue="blue", secondary_hue="slate").set(
     button_primary_background_fill="#1976d2",
     button_primary_text_color="white",
@@ -47,23 +46,17 @@ footer {visibility: hidden}
 }
 """
 
-
-# ========== Handlers ==========
 def analyze_video(url, mode):
     try:
         transcript = get_transcript(url)
         qa_agent.process_transcript(url, transcript)
-
         if not transcript:
             raise ValueError("Transcript is empty")
-
         summary = generate_summary(transcript, mode)
         mindmap = generate_mindmap(summary)
-
         return (f"### {mode.capitalize()} Summary\n\n{summary}", mindmap, "")
     except Exception as e:
         return f"**Error:** {str(e)}", None, ""
-
 
 def handle_translation(summary, lang):
     try:
@@ -71,7 +64,6 @@ def handle_translation(summary, lang):
         return f"### {lang} Translation\n\n{translated}"
     except Exception as e:
         return f"**Translation Error:** {str(e)}"
-
 
 def handle_qa(history, url, question):
     try:
@@ -86,12 +78,28 @@ def handle_qa(history, url, question):
             {"role": "assistant", "content": f"⚠️ Error: {str(e)}"},
         ]
 
-
-# ========== Interface ==========
 with gr.Blocks(theme=custom_theme, css=css) as app:
     gr.Image('assests/hermes.png', show_label=False, width=60, height=100, elem_id="logo")
     gr.Markdown('<h1 style="text-align:center;">Hermes AI</h1>')
 
+    # ========== Metadata Preview ==========
+    with gr.Row(variant="panel", visible=False) as preview_row:
+        thumbnail = gr.Image(label="Video Thumbnail", width=200)
+        with gr.Column():
+            video_title = gr.Markdown()
+            video_channel = gr.Markdown()
+
+    # ========== Metadata Preview ==========
+    with gr.Row(variant="panel", visible=False) as preview_row:
+        thumbnail = gr.Image(label="Video Thumbnail", width=200)
+        with gr.Column():
+            video_title = gr.Markdown()
+            video_channel = gr.Markdown()
+
+    # Add hidden component to control row visibility
+    visibility_tracker = gr.Textbox(visible=False)
+
+    # ========== Main Card ==========
     with gr.Column(elem_id="main-card"):
         # Input Section
         with gr.Row():
@@ -163,6 +171,42 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
                     scale=4,
                 )
                 qa_btn = gr.Button("Ask AI", variant="secondary", scale=1)
+
+    # ========== Metadata Preview Logic ==========
+    def update_preview(url):
+        if not url or not url.startswith(("https://www.youtube.com", "https://youtu.be")):
+            return [None, "", "", False]
+        
+        metadata = get_video_metadata(url)
+        if not metadata:
+            return [
+                None,
+                "### Video Not Found",
+                "The video may be private or unavailable",
+                True  # Show preview row for error message
+            ]
+        
+        return [
+            metadata["thumbnail_url"],
+            f"### {metadata['title']}",
+            f"**Channel**: {metadata['channel']}",
+            True
+        ]
+
+    url_input.input(
+        fn=update_preview,
+        inputs=url_input,
+        outputs=[thumbnail, video_title, video_channel, visibility_tracker]
+    )
+    # Separate event to update row visibility
+    def update_row_visibility(should_show):
+        return {"visible": should_show, "__type__": "update"}
+
+    visibility_tracker.change(
+        fn=update_row_visibility,
+        inputs=visibility_tracker,
+        outputs=preview_row
+    )
 
     # ========== Event Handling ==========
     analyze_btn.click(

@@ -1,32 +1,37 @@
+import requests
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
-import re
-import xml.etree.ElementTree as ET
 
+def get_video_id(url):
+    # Handles both youtu.be and youtube.com URLs
+    if "youtu.be/" in url:
+        return url.split("youtu.be/")[-1].split("?")[0]
+    elif "youtube.com/watch?v=" in url:
+        return url.split("v=")[-1].split("&")[0]
+    return None
 
 def get_transcript(url):
-    """Fetch transcript with robust error handling"""
-    video_id = extract_video_id(url)
+    video_id = get_video_id(url)
+    if not video_id:
+        raise ValueError("Invalid YouTube URL")
     try:
-        # Attempt to fetch transcript with retries
-        for _ in range(3):  # Retry up to 3 times
-            try:
-                transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-                return " ".join([t["text"] for t in transcript_list])
-            except ET.ParseError:
-                continue  # Retry on XML parse error
-        raise Exception("Failed to parse transcript after 3 attempts")
-    except (NoTranscriptFound, TranscriptsDisabled):
-        raise Exception("No English transcript available")
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        return " ".join([x['text'] for x in transcript])
     except Exception as e:
-        raise Exception(f"Transcript error: {str(e)}")
+        raise RuntimeError(f"Transcript error: {e}")
 
-
-def extract_video_id(url):
-    """Improved video ID extraction"""
-    patterns = [r"(?:v=|\/)([0-9A-Za-z_-]{11})", r"youtu\.be\/([0-9A-Za-z_-]{11})"]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    raise ValueError("Invalid YouTube URL")
+def get_video_metadata(url):
+    try:
+        response = requests.get(
+            f"https://www.youtube.com/oembed?url={url}&format=json"
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "title": data.get("title", "No title"),
+                "channel": data.get("author_name", "Unknown channel"),
+                "thumbnail_url": data.get("thumbnail_url", "")
+            }
+        return None
+    except Exception as e:
+        print(f"Metadata error: {e}")
+        return None

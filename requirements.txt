@@ -9,3 +9,4 @@ networkx>=3.1
 matplotlib>=3.7.0
 keybert>=0.7.0
 python-louvain>=0.16
+requests>=2.26.0
