@@ -1,11 +1,15 @@
 Code structure:
 
 .
+├── assests
+│   └── hermes.png
 ├── Code file structure init.txt
 ├── __init__.py
 ├── mindmap.png
 ├── README.md
 ├── requirements.txt
+├── run.sh
+├── run_test.sh
 └── src
     └── app
         ├── backend
@@ -20,7 +24,10 @@ Code structure:
         │   └── visualizer.py
         ├── frontend
         │   ├── gradio_app.py
-        │   └── __init__.py
+        │   ├── __init__.py
+        │   └── __pycache__
+        │       ├── gradio_app.cpython-312.pyc
+        │       └── __init__.cpython-312.pyc
         ├── __init__.py
         └── __pycache__
             └── __init__.cpython-312.pyc
@@ -35,32 +42,41 @@ from transformers import (
     AutoTokenizer,
     MBart50TokenizerFast,
     MBartForConditionalGeneration,
-    pipeline
+    pipeline,
+    AutoModelForSeq2SeqLM,
 )
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-import re
 import networkx as nx
 import matplotlib.pyplot as plt
 import torch
 
+
 class QAAgent:
     def __init__(self):
         # QA System
-        self.embedder = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
-        qa_model = AutoModelForQuestionAnswering.from_pretrained("deepset/roberta-large-squad2")
+        self.embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        qa_model = AutoModelForQuestionAnswering.from_pretrained(
+            "deepset/roberta-large-squad2"
+        )
         qa_tokenizer = AutoTokenizer.from_pretrained("deepset/roberta-large-squad2")
         self.qa_model = pipeline(
             "question-answering",
             model=qa_model,
-            tokenizer=qa_tokenizer
+            tokenizer=qa_tokenizer,
+            max_seq_len=512,
+            device=0 if torch.cuda.is_available() else -1,
         )
         self.cache = {}
 
         # Translation System
-        self.translator = MBartForConditionalGeneration.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
-        self.trans_tokenizer = MBart50TokenizerFast.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
+        self.translator = MBartForConditionalGeneration.from_pretrained(
+            "facebook/mbart-large-50-many-to-many-mmt"
+        )
+        self.trans_tokenizer = MBart50TokenizerFast.from_pretrained(
+            "facebook/mbart-large-50-many-to-many-mmt"
+        )
         self.lang_map = {
             "English": "en_XX",
             "Bengali": "bn_IN",
@@ -69,113 +85,143 @@ class QAAgent:
             "Spanish": "es_XX",
             "French": "fr_XX",
             "Arabic": "ar_AR",
-            "Russian": "ru_RU"
+            "Russian": "ru_RU",
         }
 
-    def chunk_text(self, text, chunk_size=500):
+    def chunk_text(self, text, chunk_size=300):
         """Enhanced chunking with overlap"""
         words = text.split()
         chunks = []
         current_chunk = []
         current_length = 0
-        
+
         for i in range(len(words)):
             current_chunk.append(words[i])
             current_length += 1
-            
-            if current_length >= chunk_size:
-                chunks.append(' '.join(current_chunk))
-                # Keep 20% overlap
-                current_chunk = current_chunk[-int(chunk_size*0.2):]
-                current_length = len(current_chunk)
-        
-        if current_chunk:
-            chunks.append(' '.join(current_chunk))
-        return chunks
 
+            if current_length >= chunk_size:
+                chunks.append(" ".join(current_chunk))
+                # Keep 20% overlap
+                current_chunk = current_chunk[-int(chunk_size * 0.2) :]
+                current_length = len(current_chunk)
+
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+        return chunks
 
     def process_transcript(self, url, transcript):
         video_id = url.split("v=")[-1]
         if video_id not in self.cache:
             chunks = self.chunk_text(transcript)
             self.cache[video_id] = {
-                'chunks': chunks,
-                'embeddings': self.embedder.encode(chunks)
+                "chunks": chunks,
+                "embeddings": self.embedder.encode(chunks),
             }
 
     def answer_question(self, url, question):
         video_id = url.split("v=")[-1]
         if video_id not in self.cache:
             raise ValueError("Process transcript first")
-            
+
         data = self.cache[video_id]
         question_embed = self.embedder.encode([question])
-        
-        similarities = cosine_similarity(question_embed, data['embeddings'])[0]
-        
+
+        similarities = cosine_similarity(question_embed, data["embeddings"])[0]
+
         # Handle case with few chunks
-        valid_k = min(3, len(similarities))
+        valid_k = min(5, len(similarities))
         if valid_k == 0:
             return "❌ Not enough context to answer this question"
-            
-        top_idxs = np.argsort(similarities)[-valid_k:]  # Use argsort instead of argpartition
-        context = " ".join([data['chunks'][i] for i in top_idxs])
-        
+
+        top_idxs = np.argsort(similarities)[
+            -valid_k:
+        ]  # Use argsort instead of argpartition
+        context = " ".join([data["chunks"][i] for i in top_idxs][-3:])
+
+        if len(context.split()) > 500:
+            context = " ".join(context.split()[:500])
+
         result = self.qa_model(
             question=question,
             context=context,
             max_answer_len=150,
-            handle_impossible_answer=True
+            handle_impossible_answer=True,
         )
-        
-        if result['answer'] == "" or result['score'] < 0.15:  # Slightly lower threshold
-            return "🔍 This information isn't clearly covered in the video."
-        return f"{result['answer']} (Confidence: {result['score']:.0%})"
 
+        if (
+            result["answer"].strip() == "" or result["score"] < 0.12
+        ):  # Slightly lower threshold
+            return f"I'm unsure, but here's a relevant excerpt: {context[:200]}..."
+        return f"{result['answer']} (Confidence: {result['score']:.0%})"
 
     def translate_text(self, text, target_lang):
         if target_lang not in self.lang_map:
             raise ValueError(f"Unsupported language: {target_lang}")
-            
+
         self.trans_tokenizer.src_lang = "en_XX"
         encoded = self.trans_tokenizer(text, return_tensors="pt")
         generated_tokens = self.translator.generate(
             **encoded,
-            forced_bos_token_id=self.trans_tokenizer.lang_code_to_id[self.lang_map[target_lang]]
+            forced_bos_token_id=self.trans_tokenizer.lang_code_to_id[
+                self.lang_map[target_lang]
+            ],
         )
-        return self.trans_tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+        return self.trans_tokenizer.batch_decode(
+            generated_tokens, skip_special_tokens=True
+        )[0]
+
+
+# Explicitly load tokenizer with model_max_length
+summarizer_tokenizer = AutoTokenizer.from_pretrained(
+    "facebook/bart-large-cnn"
+    # model_max_length=1024  # BART's actual max input length
+)
+summarizer_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-large-cnn")
 
 summarizer = pipeline(
-    "summarization", 
-    model="facebook/bart-large-cnn",
-    device=0 if torch.cuda.is_available() else -1
+    "summarization",
+    model=summarizer_model,
+    tokenizer=summarizer_tokenizer,
+    device=0 if torch.cuda.is_available() else -1,
 )
+
+
 def chunk_text(text, max_tokens=900):
-    """Split text into roughly max_tokens word chunks."""
-    words = text.split()
-    for i in range(0, len(words), max_tokens):
-        yield " ".join(words[i:i+max_tokens])
+    """Split text by tokens instead of words"""
+    tokenizer = summarizer_tokenizer  # Reuse the initialized tokenizer
+    tokens = tokenizer.encode(text, truncation=False, add_special_tokens=False)
+
+    for i in range(0, len(tokens), max_tokens):
+        chunk = tokens[i : i + max_tokens]
+        yield tokenizer.decode(chunk, skip_special_tokens=True)
+
 
 def generate_summary(transcript, mode):
     # Set summary lengths based on mode
     if mode.lower() == "short":
-        max_length, min_length = 60, 20
+        max_length, min_length = 40, 20
     elif mode.lower() == "medium":
-        max_length, min_length = 120, 40
+        max_length, min_length = 100, 40
     else:  # detailed
-        max_length, min_length = 200, 60
+        max_length, min_length = 150, 60
 
     # Always chunk transcript if too long
     summaries = []
-    for chunk in chunk_text(transcript, max_tokens=900):  # 900 is safe for BART
+    for chunk in chunk_text(transcript, max_tokens=900):
+        # Explicitly truncate input to 1024 tokens
+        inputs = summarizer_tokenizer(
+            chunk, max_length=1024, truncation=True, return_tensors="pt"
+        )
+        truncated_chunk = summarizer_tokenizer.decode(inputs["input_ids"][0])
+
         summary = summarizer(
-            chunk,
+            truncated_chunk,  # Use truncated input
             max_length=max_length,
             min_length=min_length,
             do_sample=False,
-            truncation=True
-        )[0]['summary_text']
+        )[0]["summary_text"]
         summaries.append(summary)
+
     # If multiple chunks, summarize the summaries
     if len(summaries) > 1:
         combined = " ".join(summaries)
@@ -184,11 +230,12 @@ def generate_summary(transcript, mode):
             max_length=max_length,
             min_length=min_length,
             do_sample=False,
-            truncation=True
-        )[0]['summary_text']
+            truncation=True,
+        )[0]["summary_text"]
         return final_summary
     else:
         return summaries[0]
+
 
 def generate_mindmap(summary):
     """Generate mindmap visualization"""
@@ -197,19 +244,24 @@ def generate_mindmap(summary):
     for i, word in enumerate(words):
         G.add_node(word)
         if i > 0:
-            G.add_edge(words[i-1], word)
-    
+            G.add_edge(words[i - 1], word)
+
     plt.figure(figsize=(16, 10))
     pos = nx.spring_layout(G, k=0.5)
     nx.draw(
-        G, pos, with_labels=True, 
-        node_size=2500, node_color="skyblue",
-        font_size=10, font_weight="bold",
-        edge_color="gray"
+        G,
+        pos,
+        with_labels=True,
+        node_size=2500,
+        node_color="skyblue",
+        font_size=10,
+        font_weight="bold",
+        edge_color="gray",
     )
     plt.savefig("mindmap.png", bbox_inches="tight")
     plt.close()
     return "mindmap.png"
+
 
 qa_agent = QAAgent()
 
@@ -220,6 +272,7 @@ from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisable
 import re
 import xml.etree.ElementTree as ET
 
+
 def get_transcript(url):
     """Fetch transcript with robust error handling"""
     video_id = extract_video_id(url)
@@ -228,7 +281,7 @@ def get_transcript(url):
         for _ in range(3):  # Retry up to 3 times
             try:
                 transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-                return " ".join([t['text'] for t in transcript_list])
+                return " ".join([t["text"] for t in transcript_list])
             except ET.ParseError:
                 continue  # Retry on XML parse error
         raise Exception("Failed to parse transcript after 3 attempts")
@@ -237,18 +290,15 @@ def get_transcript(url):
     except Exception as e:
         raise Exception(f"Transcript error: {str(e)}")
 
+
 def extract_video_id(url):
     """Improved video ID extraction"""
-    patterns = [
-        r"(?:v=|\/)([0-9A-Za-z_-]{11})",
-        r"youtu\.be\/([0-9A-Za-z_-]{11})"
-    ]
+    patterns = [r"(?:v=|\/)([0-9A-Za-z_-]{11})", r"youtu\.be\/([0-9A-Za-z_-]{11})"]
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
     raise ValueError("Invalid YouTube URL")
-
 
 
 File src > app > backend > visualizer.py:
@@ -259,15 +309,13 @@ import matplotlib.pyplot as plt
 import community.community_louvain as cl
 from transformers import pipeline
 import tempfile
-import os
+
 
 class VisualSummarizer:
     def __init__(self):
         self.kw_model = KeyBERT(model=SentenceTransformer("all-MiniLM-L6-v2"))
         self.ner_pipeline = pipeline(
-            "ner",
-            model="dslim/bert-base-NER",
-            aggregation_strategy="simple"
+            "ner", model="dslim/bert-base-NER", aggregation_strategy="simple"
         )
 
     def create_mindmap(self, text, max_nodes=15):
@@ -278,15 +326,12 @@ class VisualSummarizer:
 
     def _extract_keywords(self, text):
         kw_results = self.kw_model.extract_keywords(
-            text, 
-            keyphrase_ngram_range=(1, 2),
-            stop_words='english',
-            top_n=20
+            text, keyphrase_ngram_range=(1, 2), stop_words="english", top_n=20
         )
         ner_results = self.ner_pipeline(text)
         combined = {kw[0]: kw[1] for kw in kw_results}
         for entity in ner_results:
-            combined[entity['word']] = entity['score']
+            combined[entity["word"]] = entity["score"]
         return combined
 
     def _filter_keywords(self, keywords, max_nodes):
@@ -299,8 +344,11 @@ class VisualSummarizer:
         for kw in keywords:
             G.add_node(kw)
         for i, kw1 in enumerate(keywords):
-            for kw2 in keywords[i+1:]:
-                if f' {kw1.lower()} ' in text_lower and f' {kw2.lower()} ' in text_lower:
+            for kw2 in keywords[i + 1 :]:
+                if (
+                    f" {kw1.lower()} " in text_lower
+                    and f" {kw2.lower()} " in text_lower
+                ):
                     G.add_edge(kw1, kw2)
         return G
 
@@ -309,12 +357,17 @@ class VisualSummarizer:
         if len(graph.nodes) > 0:
             partition = cl.best_partition(graph)
             pos = nx.spring_layout(graph, k=0.5)
-            nx.draw_networkx_nodes(graph, pos, node_size=2500, cmap=plt.cm.RdYlBu, 
-                                node_color=list(partition.values()))
+            nx.draw_networkx_nodes(
+                graph,
+                pos,
+                node_size=2500,
+                cmap=plt.cm.RdYlBu,
+                node_color=list(partition.values()),
+            )
             nx.draw_networkx_edges(graph, pos, alpha=0.5)
-            nx.draw_networkx_labels(graph, pos, font_size=9, font_family='sans-serif')
+            nx.draw_networkx_labels(graph, pos, font_size=9, font_family="sans-serif")
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        plt.savefig(temp_file.name, bbox_inches='tight')
+        plt.savefig(temp_file.name, bbox_inches="tight")
         plt.close()
         return temp_file.name
 
@@ -325,16 +378,14 @@ File src > app > frontend > gradio_app.py:
 import gradio as gr
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from app.backend.agent import generate_summary, generate_mindmap, qa_agent
 from app.backend.utils import get_transcript
 
 # ========== Theme & CSS ==========
-custom_theme = gr.themes.Default(
-    primary_hue="blue",
-    secondary_hue="slate"
-).set(
+custom_theme = gr.themes.Default(primary_hue="blue", secondary_hue="slate").set(
     button_primary_background_fill="#1976d2",
     button_primary_text_color="white",
     button_primary_background_fill_hover="#1565c0",
@@ -373,25 +424,23 @@ footer {visibility: hidden}
 }
 """
 
+
 # ========== Handlers ==========
 def analyze_video(url, mode):
     try:
         transcript = get_transcript(url)
         qa_agent.process_transcript(url, transcript)
-        
+
         if not transcript:
             raise ValueError("Transcript is empty")
-            
+
         summary = generate_summary(transcript, mode)
         mindmap = generate_mindmap(summary)
-        
-        return (
-            f"### {mode.capitalize()} Summary\n\n{summary}",
-            mindmap,
-            ""
-        )
+
+        return (f"### {mode.capitalize()} Summary\n\n{summary}", mindmap, "")
     except Exception as e:
         return f"**Error:** {str(e)}", None, ""
+
 
 def handle_translation(summary, lang):
     try:
@@ -400,24 +449,26 @@ def handle_translation(summary, lang):
     except Exception as e:
         return f"**Translation Error:** {str(e)}"
 
+
 def handle_qa(history, url, question):
     try:
         answer = qa_agent.answer_question(url, question)
         return history + [
             {"role": "user", "content": question},
-            {"role": "assistant", "content": answer}
+            {"role": "assistant", "content": answer},
         ]
     except Exception as e:
         return history + [
             {"role": "user", "content": question},
-            {"role": "assistant", "content": f"⚠️ Error: {str(e)}"}
+            {"role": "assistant", "content": f"⚠️ Error: {str(e)}"},
         ]
 
 
 # ========== Interface ==========
 with gr.Blocks(theme=custom_theme, css=css) as app:
-    gr.Markdown("# 🎥 YouTube AI Analyzer 6.0")
-    
+    gr.Image('assests/hermes.png', show_label=False, width=60, height=100, elem_id="logo")
+    gr.Markdown('<h1 style="text-align:center;">Hermes AI</h1>')
+
     with gr.Column(elem_id="main-card"):
         # Input Section
         with gr.Row():
@@ -425,58 +476,68 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
                 label="YouTube URL",
                 placeholder="Paste video link here...",
                 max_lines=1,
-                scale=4
+                scale=4,
             )
             mode_selector = gr.Radio(
                 choices=["Short", "Medium", "Detailed"],
                 value="Medium",
                 label="Summary Mode",
-                scale=2
+                scale=2,
             )
             analyze_btn = gr.Button("Analyze Video", variant="primary", scale=1)
-        
+
         # Summary Section
         summary_output = gr.Markdown(elem_id="summary_output")
         copy_summary_btn = gr.Button("📋 Copy Summary", elem_classes="copy-btn")
-        
+
         # Translation Section
         with gr.Accordion("🌍 Translation (Supports 8 Languages)", open=False):
             with gr.Row():
                 lang_selector = gr.Dropdown(
-                    choices=["English", "Bengali", "Hindi", "Chinese",
-                            "Spanish", "French", "Arabic", "Russian"],
+                    choices=[
+                        "English",
+                        "Bengali",
+                        "Hindi",
+                        "Chinese",
+                        "Spanish",
+                        "French",
+                        "Arabic",
+                        "Russian",
+                    ],
                     value="English",
                     label="Target Language",
-                    scale=3
+                    scale=3,
                 )
                 translate_btn = gr.Button("Translate", scale=1)
             translated_output = gr.Markdown(elem_id="translated_output")
-            copy_translate_btn = gr.Button("📋 Copy Translation", elem_classes="copy-btn")
-        
+            copy_translate_btn = gr.Button(
+                "📋 Copy Translation", elem_classes="copy-btn"
+            )
+
         # Mind Map
         with gr.Accordion("🧠 Interactive Mind Map", open=True):
             mindmap_output = gr.Image(
                 label="Concept Visualization",
                 elem_id="mindmap-output",
-                show_download_button=True
+                show_download_button=True,
             )
-        
+
         # Q&A Section
         with gr.Accordion("💬 AI-Powered Q&A", open=False):
             qa_chat = gr.Chatbot(
                 height=400,
                 avatar_images=(
                     "https://i.imgur.com/7kQEsHU.png",  # User avatar
-                    "https://i.imgur.com/8EeSUQ3.png"   # Bot avatar
+                    "https://i.imgur.com/8EeSUQ3.png",  # Bot avatar
                 ),
                 show_label=False,
-                type="messages"  # New format required
+                type="messages",  # New format required
             )
             with gr.Row():
                 qa_input = gr.Textbox(
                     placeholder="Ask anything about the video...",
                     show_label=False,
-                    scale=4
+                    scale=4,
                 )
                 qa_btn = gr.Button("Ask AI", variant="secondary", scale=1)
 
@@ -484,43 +545,34 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
     analyze_btn.click(
         analyze_video,
         inputs=[url_input, mode_selector],
-        outputs=[summary_output, mindmap_output, translated_output]
+        outputs=[summary_output, mindmap_output, translated_output],
     )
-    
+
     translate_btn.click(
         handle_translation,
         inputs=[summary_output, lang_selector],
-        outputs=translated_output
+        outputs=translated_output,
     )
-    
-    qa_btn.click(
-        handle_qa,
-        inputs=[qa_chat, url_input, qa_input],
-        outputs=qa_chat
-    )
-    qa_input.submit(
-        handle_qa,
-        inputs=[qa_chat, url_input, qa_input],
-        outputs=qa_chat
-    )
-    
+
+    qa_btn.click(handle_qa, inputs=[qa_chat, url_input, qa_input], outputs=qa_chat)
+    qa_input.submit(handle_qa, inputs=[qa_chat, url_input, qa_input], outputs=qa_chat)
+
     # Copy functionality
     copy_summary_btn.click(
         None,
         inputs=summary_output,
         outputs=None,
-        js="async (text) => { await navigator.clipboard.writeText(text) }"
+        js="async (text) => { await navigator.clipboard.writeText(text) }",
     )
     copy_translate_btn.click(
         None,
         inputs=translated_output,
         outputs=None,
-        js="async (text) => { await navigator.clipboard.writeText(text) }"
+        js="async (text) => { await navigator.clipboard.writeText(text) }",
     )
 
 if __name__ == "__main__":
     app.launch()
-
 
 
 File src > app > __init__.py:
