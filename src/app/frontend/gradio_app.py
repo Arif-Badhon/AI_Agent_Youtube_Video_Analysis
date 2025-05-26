@@ -1,11 +1,18 @@
 import gradio as gr
 import sys
 import os
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from app.backend.agent import generate_summary, generate_mindmap, qa_agent
 from app.backend.utils import get_transcript, get_video_metadata
+
+# Add at the top of your gradio_app.py
+import warnings
+from transformers import logging
+logging.set_verbosity_error()  # Suppress all transformers warnings
+warnings.filterwarnings("ignore", category=UserWarning)  # General warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 custom_theme = gr.themes.Default(primary_hue="blue", secondary_hue="slate").set(
     button_primary_background_fill="#1976d2",
@@ -44,6 +51,16 @@ footer {visibility: hidden}
 .dark .copy-btn {
     background: #1565c0!important;
 }
+button.suggested-question {
+    max-width: 300px;
+    white-space: normal;
+    line-height: 1.2;
+    padding: 8px 12px;
+    margin: 4px;
+    flex-grow: 1;
+    text-align: left;
+    height: auto;
+}
 """
 
 def analyze_video(url, mode):
@@ -79,6 +96,7 @@ def handle_qa(history, url, question):
         ]
 
 with gr.Blocks(theme=custom_theme, css=css) as app:
+    # ========== Header with Logo ==========
     gr.Image('assests/hermes.png', show_label=False, width=60, height=100, elem_id="logo")
     gr.Markdown('<h1 style="text-align:center;">Hermes AI</h1>')
 
@@ -89,15 +107,9 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
             video_title = gr.Markdown()
             video_channel = gr.Markdown()
 
-    # ========== Metadata Preview ==========
-    with gr.Row(variant="panel", visible=False) as preview_row:
-        thumbnail = gr.Image(label="Video Thumbnail", width=200)
-        with gr.Column():
-            video_title = gr.Markdown()
-            video_channel = gr.Markdown()
-
-    # Add hidden component to control row visibility
+    # Hidden component to control visibility
     visibility_tracker = gr.Textbox(visible=False)
+    visibility_state = gr.State(False)
 
     # ========== Main Card ==========
     with gr.Column(elem_id="main-card"):
@@ -158,12 +170,23 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
             qa_chat = gr.Chatbot(
                 height=400,
                 avatar_images=(
-                    "https://i.imgur.com/7kQEsHU.png",  # User avatar
-                    "https://i.imgur.com/8EeSUQ3.png",  # Bot avatar
+                    "https://i.imgur.com/7kQEsHU.png",
+                    "https://i.imgur.com/8EeSUQ3.png",
                 ),
                 show_label=False,
-                type="messages",  # New format required
+                type="messages",
             )
+            
+            # Suggested Questions
+            suggested_questions_visible = gr.State(False)
+            with gr.Row(visible=False) as suggested_questions_row:
+                gr.Markdown("**Suggested Questions:**")
+                suggested_btns = [
+                    gr.Button(visible=False, elem_classes="suggested-question") 
+                    for _ in range(3)
+                ]
+            
+            # Input Section
             with gr.Row():
                 qa_input = gr.Textbox(
                     placeholder="Ask anything about the video...",
@@ -183,7 +206,7 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
                 None,
                 "### Video Not Found",
                 "The video may be private or unavailable",
-                True  # Show preview row for error message
+                True
             ]
         
         return [
@@ -198,9 +221,10 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
         inputs=url_input,
         outputs=[thumbnail, video_title, video_channel, visibility_tracker]
     )
-    # Separate event to update row visibility
+
+    # Replace visibility_tracker logic with:
     def update_row_visibility(should_show):
-        return {"visible": should_show, "__type__": "update"}
+        return gr.Row.update(visible=should_show)
 
     visibility_tracker.change(
         fn=update_row_visibility,
@@ -208,12 +232,87 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
         outputs=preview_row
     )
 
-    # ========== Event Handling ==========
+
+    # ========== Suggested Questions Logic ==========
+    def update_suggested_questions(summary):
+        """Generate questions and return visibility state"""
+        if not summary or "Error:" in summary:
+            return [{"visible": False}]*3 + [False]
+        
+        try:
+            # Your question generation logic here
+            questions = ["Q1", "Q2", "Q3"]  # Replace with actual generated questions
+            updates = []
+            for i in range(3):
+                updates.append({
+                    "visible": i < len(questions),
+                    "value": questions[i] if i < len(questions) else "",
+                    "__type__": "update"
+                })
+            return updates + [len(questions) > 0]
+        except Exception as e:
+            return [{"visible": False}]*3 + [False]
+
+    def update_row_visibility(visible):
+        """Convert boolean to proper row update syntax"""
+        return {"visible": visible, "__type__": "update"}
+
+    # In your event handling:
     analyze_btn.click(
         analyze_video,
         inputs=[url_input, mode_selector],
-        outputs=[summary_output, mindmap_output, translated_output],
+        outputs=[summary_output, mindmap_output, translated_output]
+    ).then(
+        update_suggested_questions,
+        inputs=summary_output,
+        outputs=[*suggested_btns, visibility_state]
+    ).then(
+        update_row_visibility,
+        inputs=visibility_state,
+        outputs=suggested_questions_row
     )
+
+
+    def use_suggested_question(question):
+        """Insert question into input and clear suggestions"""
+        return (
+            question,  # Update qa_input
+            {"visible": False, "__type__": "update"},  # Button 1
+            {"visible": False, "__type__": "update"},  # Button 2
+            {"visible": False, "__type__": "update"},  # Button 3
+            {"visible": False, "__type__": "update"}   # Row visibility
+        )
+
+# Update button click handlers
+    for btn in suggested_btns:
+        btn.click(
+            fn=use_suggested_question,
+            inputs=btn,
+            outputs=[qa_input, *suggested_btns, suggested_questions_row]
+        ).then(
+            fn=handle_qa,
+            inputs=[qa_chat, url_input, qa_input],
+            outputs=qa_chat
+        )
+
+    # ========== Event Handling ==========
+    # Replace current analyze_btn.click() calls with:
+    def clear_suggestions():
+        return [{"visible": False}]*3 + [False]
+    analyze_btn.click(
+    fn=clear_suggestions,
+    outputs=[*suggested_btns, suggested_questions_row]
+).then(
+    analyze_video,
+    inputs=[url_input, mode_selector],
+    outputs=[summary_output, mindmap_output, translated_output]
+).then(
+    fn=update_suggested_questions,
+    inputs=summary_output,
+    outputs=[*suggested_btns, suggested_questions_row]
+)
+
+
 
     translate_btn.click(
         handle_translation,

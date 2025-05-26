@@ -1,5 +1,6 @@
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
 def get_video_id(url):
     # Handles both youtu.be and youtube.com URLs
@@ -10,14 +11,21 @@ def get_video_id(url):
     return None
 
 def get_transcript(url):
-    video_id = get_video_id(url)
-    if not video_id:
-        raise ValueError("Invalid YouTube URL")
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        return " ".join([x['text'] for x in transcript])
+        video_id = get_video_id(url)
+        if not video_id:
+            raise ValueError("Invalid YouTube URL")
+        
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript = transcript_list.find_generated_transcript(['en'])
+        
+        # Access text via object attribute instead of dictionary key
+        return " ".join([snippet.text for snippet in transcript.fetch()])
+        
+    except (TranscriptsDisabled, NoTranscriptFound) as e:
+        raise RuntimeError(f"Transcript unavailable: {str(e)}")
     except Exception as e:
-        raise RuntimeError(f"Transcript error: {e}")
+        raise RuntimeError(f"Transcript error: {str(e)}")
 
 def get_video_metadata(url):
     try:

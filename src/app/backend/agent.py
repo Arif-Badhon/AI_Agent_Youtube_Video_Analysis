@@ -48,6 +48,25 @@ class QAAgent:
             "Arabic": "ar_AR",
             "Russian": "ru_RU",
         }
+        self.question_generator = pipeline(
+            "text2text-generation",
+            model="mrm8488/t5-base-finetuned-question-generation-ap",
+            device=0 if torch.cuda.is_available() else -1,
+            torch_dtype=torch.float32
+        )
+
+    # app/backend/agent.py
+    def generate_questions(self, text, num_questions=3):
+        prompt = f"generate questions: {text[:3000]}"
+        results = self.question_generator(
+            prompt,
+            max_length=50,
+            num_beams=5,  # Enable beam search
+            num_return_sequences=num_questions,
+            early_stopping=True
+        )
+        return [q['generated_text'].strip() for q in results if '?' in q['generated_text']]
+
 
     def chunk_text(self, text, chunk_size=300):
         """Enhanced chunking with overlap"""
