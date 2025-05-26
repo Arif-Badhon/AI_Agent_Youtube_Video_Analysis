@@ -89,7 +89,8 @@ def handle_qa(history, url, question):
 
 # ========== Interface ==========
 with gr.Blocks(theme=custom_theme, css=css) as app:
-    gr.Markdown("# 🎥 YouTube AI Analyzer 6.0")
+    gr.Image('assests/hermes.png', show_label=False, width=60, height=100, elem_id="logo")
+    gr.Markdown('<h1 style="text-align:center;">Hermes AI</h1>')
 
     with gr.Column(elem_id="main-card"):
         # Input Section
