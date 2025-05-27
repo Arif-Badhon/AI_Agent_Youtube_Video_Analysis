@@ -1,11 +1,17 @@
 import gradio as gr
 import sys
 import os
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from app.backend.agent import generate_summary, generate_mindmap, qa_agent
 from app.backend.utils import get_transcript, get_video_metadata
+
+import warnings
+from transformers import logging
+logging.set_verbosity_error()
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 custom_theme = gr.themes.Default(primary_hue="blue", secondary_hue="slate").set(
     button_primary_background_fill="#1976d2",
@@ -44,6 +50,16 @@ footer {visibility: hidden}
 .dark .copy-btn {
     background: #1565c0!important;
 }
+button.suggested-question {
+    max-width: 300px;
+    white-space: normal;
+    line-height: 1.2;
+    padding: 8px 12px;
+    margin: 4px;
+    flex-grow: 1;
+    text-align: left;
+    height: auto;
+}
 """
 
 def analyze_video(url, mode):
@@ -78,25 +94,66 @@ def handle_qa(history, url, question):
             {"role": "assistant", "content": f"⚠️ Error: {str(e)}"},
         ]
 
+def update_suggested_questions(summary):
+    """Generate questions and return visibility state"""
+    if not summary or "Error:" in summary:
+        return [gr.update(visible=False)]*3 + [gr.Row.update(visible=False)]
+    
+    try:
+        questions = qa_agent.generate_questions(summary, num_questions=3)
+        return [
+            gr.update(visible=True, value=questions[0]),
+            gr.update(visible=len(questions)>1, value=questions[1] if len(questions)>1 else ""),
+            gr.update(visible=len(questions)>2, value=questions[2] if len(questions)>2 else ""),
+            gr.Row.update(visible=len(questions)>0)
+        ]
+    except Exception as e:
+        print(f"Question generation error: {e}")
+        return [gr.update(visible=False)]*3 + [gr.Row.update(visible=False)]
+
+def update_preview(url):
+    if not url or not url.startswith(("https://www.youtube.com", "https://youtu.be")):
+        return [None, "", "", False]
+    
+    metadata = get_video_metadata(url)
+    if not metadata:
+        return [
+            None,
+            "### Video Not Found",
+            "The video may be private or unavailable",
+            True
+        ]
+    
+    return [
+        metadata["thumbnail_url"],
+        f"### {metadata['title']}",
+        f"**Channel**: {metadata['channel']}",
+        True
+    ]
+
+def update_row_visibility(should_show):
+    return gr.Row.update(visible=should_show)
+
+def use_suggested_question(question):
+    """Insert question into input and clear suggestions"""
+    return (
+        question,
+        *[gr.update(visible=False) for _ in range(3)],
+        gr.Row.update(visible=False)
+    )
+
 with gr.Blocks(theme=custom_theme, css=css) as app:
+    # ========== Header with Logo ==========
     gr.Image('assests/hermes.png', show_label=False, width=60, height=100, elem_id="logo")
     gr.Markdown('<h1 style="text-align:center;">Hermes AI</h1>')
 
     # ========== Metadata Preview ==========
-    with gr.Row(variant="panel", visible=False) as preview_row:
+    with gr.Row(visible=False) as preview_row:
         thumbnail = gr.Image(label="Video Thumbnail", width=200)
         with gr.Column():
             video_title = gr.Markdown()
             video_channel = gr.Markdown()
 
-    # ========== Metadata Preview ==========
-    with gr.Row(variant="panel", visible=False) as preview_row:
-        thumbnail = gr.Image(label="Video Thumbnail", width=200)
-        with gr.Column():
-            video_title = gr.Markdown()
-            video_channel = gr.Markdown()
-
-    # Add hidden component to control row visibility
     visibility_tracker = gr.Textbox(visible=False)
 
     # ========== Main Card ==========
@@ -141,9 +198,7 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
                 )
                 translate_btn = gr.Button("Translate", scale=1)
             translated_output = gr.Markdown(elem_id="translated_output")
-            copy_translate_btn = gr.Button(
-                "📋 Copy Translation", elem_classes="copy-btn"
-            )
+            copy_translate_btn = gr.Button("📋 Copy Translation", elem_classes="copy-btn")
 
         # Mind Map
         with gr.Accordion("🧠 Interactive Mind Map", open=True):
@@ -158,12 +213,21 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
             qa_chat = gr.Chatbot(
                 height=400,
                 avatar_images=(
-                    "https://i.imgur.com/7kQEsHU.png",  # User avatar
-                    "https://i.imgur.com/8EeSUQ3.png",  # Bot avatar
+                    "https://i.imgur.com/7kQEsHU.png",
+                    "https://i.imgur.com/8EeSUQ3.png",
                 ),
                 show_label=False,
-                type="messages",  # New format required
+                type="messages",
             )
+            
+            # Suggested Questions
+            with gr.Row(visible=False) as suggested_questions_row:
+                suggested_btns = [
+                    gr.Button(visible=False, elem_classes="suggested-question") 
+                    for _ in range(3)
+                ]
+            
+            # Input Section
             with gr.Row():
                 qa_input = gr.Textbox(
                     placeholder="Ask anything about the video...",
@@ -172,35 +236,12 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
                 )
                 qa_btn = gr.Button("Ask AI", variant="secondary", scale=1)
 
-    # ========== Metadata Preview Logic ==========
-    def update_preview(url):
-        if not url or not url.startswith(("https://www.youtube.com", "https://youtu.be")):
-            return [None, "", "", False]
-        
-        metadata = get_video_metadata(url)
-        if not metadata:
-            return [
-                None,
-                "### Video Not Found",
-                "The video may be private or unavailable",
-                True  # Show preview row for error message
-            ]
-        
-        return [
-            metadata["thumbnail_url"],
-            f"### {metadata['title']}",
-            f"**Channel**: {metadata['channel']}",
-            True
-        ]
-
+    # ========== Event Handling ==========
     url_input.input(
         fn=update_preview,
         inputs=url_input,
         outputs=[thumbnail, video_title, video_channel, visibility_tracker]
     )
-    # Separate event to update row visibility
-    def update_row_visibility(should_show):
-        return {"visible": should_show, "__type__": "update"}
 
     visibility_tracker.change(
         fn=update_row_visibility,
@@ -208,12 +249,26 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
         outputs=preview_row
     )
 
-    # ========== Event Handling ==========
     analyze_btn.click(
         analyze_video,
         inputs=[url_input, mode_selector],
-        outputs=[summary_output, mindmap_output, translated_output],
+        outputs=[summary_output, mindmap_output, translated_output]
+    ).then(
+        update_suggested_questions,
+        inputs=summary_output,
+        outputs=[*suggested_btns, suggested_questions_row]
     )
+
+    for btn in suggested_btns:
+        btn.click(
+            fn=use_suggested_question,
+            inputs=btn,
+            outputs=[qa_input, *suggested_btns, suggested_questions_row]
+        ).then(
+            fn=handle_qa,
+            inputs=[qa_chat, url_input, qa_input],
+            outputs=qa_chat
+        )
 
     translate_btn.click(
         handle_translation,
