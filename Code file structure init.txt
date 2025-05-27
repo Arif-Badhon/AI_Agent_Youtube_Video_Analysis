@@ -90,21 +90,22 @@ class QAAgent:
         self.question_generator = pipeline(
             "text2text-generation",
             model="mrm8488/t5-base-finetuned-question-generation-ap",
-            tokenizer="t5-base",
-            device_map="auto",
-            legacy=False  # Critical for suppressing tokenizer warning
+            device=0 if torch.cuda.is_available() else -1,
+            torch_dtype=torch.float32
         )
 
+    # app/backend/agent.py
     def generate_questions(self, text, num_questions=3):
-        """Generate suggested questions from summary text"""
-        prompt = f"generate questions: {text[:3000]}"  # Truncate to avoid model limits
+        prompt = f"generate questions: {text[:3000]}"
         results = self.question_generator(
             prompt,
             max_length=50,
+            num_beams=5,  # Enable beam search
             num_return_sequences=num_questions,
-            clean_up_tokenization_spaces=True
+            early_stopping=True
         )
         return [q['generated_text'].strip() for q in results if '?' in q['generated_text']]
+
 
     def chunk_text(self, text, chunk_size=300):
         """Enhanced chunking with overlap"""
@@ -284,6 +285,7 @@ def generate_mindmap(summary):
 qa_agent = QAAgent()
 
 
+
 File src > app > backend > utils.py:
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -408,7 +410,7 @@ File src > app > frontend > gradio_app.py:
 import gradio as gr
 import sys
 import os
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from app.backend.agent import generate_summary, generate_mindmap, qa_agent
@@ -516,6 +518,7 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
 
     # Hidden component to control visibility
     visibility_tracker = gr.Textbox(visible=False)
+    visibility_state = gr.State(False)
 
     # ========== Main Card ==========
     with gr.Column(elem_id="main-card"):
@@ -584,6 +587,7 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
             )
             
             # Suggested Questions
+            suggested_questions_visible = gr.State(False)
             with gr.Row(visible=False) as suggested_questions_row:
                 gr.Markdown("**Suggested Questions:**")
                 suggested_btns = [
@@ -627,8 +631,9 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
         outputs=[thumbnail, video_title, video_channel, visibility_tracker]
     )
 
+    # Replace visibility_tracker logic with:
     def update_row_visibility(should_show):
-        return {"visible": should_show, "__type__": "update"}
+        return gr.Row.update(visible=should_show)
 
     visibility_tracker.change(
         fn=update_row_visibility,
@@ -636,42 +641,58 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
         outputs=preview_row
     )
 
+
     # ========== Suggested Questions Logic ==========
     def update_suggested_questions(summary):
-        """Generate and display suggested questions"""
+        """Generate questions and return visibility state"""
         if not summary or "Error:" in summary:
-            return [
-                {"visible": False, "__type__": "update"} for _ in range(3)
-            ] + [{"visible": False, "__type__": "update"}]
+            return [{"visible": False}]*3 + [False]
         
         try:
-            questions = qa_agent.generate_questions(summary, num_questions=3)
+            # Your question generation logic here
+            questions = ["Q1", "Q2", "Q3"]  # Replace with actual generated questions
             updates = []
             for i in range(3):
-                if i < len(questions):
-                    updates.append({
-                        "visible": True, 
-                        "value": questions[i], 
-                        "__type__": "update"
-                    })
-                else:
-                    updates.append({"visible": False, "__type__": "update"})
-            print("UPDATES:", updates)
-            return updates + [{"visible": len(questions) > 0, "__type__": "update"}]
+                updates.append({
+                    "visible": i < len(questions),
+                    "value": questions[i] if i < len(questions) else "",
+                    "__type__": "update"
+                })
+            return updates + [len(questions) > 0]
         except Exception as e:
-            print(f"Question generation failed: {str(e)}")
-            return [
-                {"visible": False, "__type__": "update"} for _ in range(3)
-            ] + [{"visible": False, "__type__": "update"}]
+            return [{"visible": False}]*3 + [False]
+
+    def update_row_visibility(visible):
+        """Convert boolean to proper row update syntax"""
+        return {"visible": visible, "__type__": "update"}
+
+    # In your event handling:
+    analyze_btn.click(
+        analyze_video,
+        inputs=[url_input, mode_selector],
+        outputs=[summary_output, mindmap_output, translated_output]
+    ).then(
+        update_suggested_questions,
+        inputs=summary_output,
+        outputs=[*suggested_btns, visibility_state]
+    ).then(
+        update_row_visibility,
+        inputs=visibility_state,
+        outputs=suggested_questions_row
+    )
 
 
     def use_suggested_question(question):
         """Insert question into input and clear suggestions"""
         return (
-            question,
-            [{"visible": False, "__type__": "update"} for _ in range(3)] + [{"visible": False, "__type__": "update"}]
+            question,  # Update qa_input
+            {"visible": False, "__type__": "update"},  # Button 1
+            {"visible": False, "__type__": "update"},  # Button 2
+            {"visible": False, "__type__": "update"},  # Button 3
+            {"visible": False, "__type__": "update"}   # Row visibility
         )
 
+# Update button click handlers
     for btn in suggested_btns:
         btn.click(
             fn=use_suggested_question,
@@ -684,17 +705,23 @@ with gr.Blocks(theme=custom_theme, css=css) as app:
         )
 
     # ========== Event Handling ==========
+    # Replace current analyze_btn.click() calls with:
+    def clear_suggestions():
+        return [{"visible": False}]*3 + [False]
     analyze_btn.click(
-        analyze_video,
-        inputs=[url_input, mode_selector],
-        outputs=[summary_output, mindmap_output, translated_output],
-    )
+    fn=clear_suggestions,
+    outputs=[*suggested_btns, suggested_questions_row]
+).then(
+    analyze_video,
+    inputs=[url_input, mode_selector],
+    outputs=[summary_output, mindmap_output, translated_output]
+).then(
+    fn=update_suggested_questions,
+    inputs=summary_output,
+    outputs=[*suggested_btns, suggested_questions_row]
+)
 
-    analyze_btn.click(
-        fn=update_suggested_questions,
-        inputs=summary_output,
-        outputs=[*suggested_btns, suggested_questions_row]
-    )
+
 
     translate_btn.click(
         handle_translation,
