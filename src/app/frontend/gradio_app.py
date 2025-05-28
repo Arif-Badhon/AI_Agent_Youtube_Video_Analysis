@@ -1,4 +1,5 @@
 import gradio as gr
+gr.set_static_paths(paths=["assests"])
 import sys
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -370,8 +371,14 @@ def use_suggested_question(question):
 with gr.Blocks(theme=custom_theme, css=css, title="Hermes AI") as app:
     
     # ========== Neon Header ==========
-    gr.HTML('<h1 class="neon-title">HERMES AI</h1>')
-    
+    gr.HTML(
+    '''
+    <div style="display: flex; align-items: center; justify-content: center; gap: 1.2rem; margin-top: 2rem; margin-bottom: 2rem;">
+        <img src="/gradio_api/file=assests/hermes.png" alt="Logo" style="height: 64px; width: 64px; object-fit: contain;">
+        <span class="neon-title" style="margin: 0;">HERMES AI</span>
+    </div>
+    '''
+            )    
     # ========== Input Section ==========
     with gr.Row(elem_classes="input-section"):
         with gr.Column(elem_classes="neon-card"):
@@ -537,4 +544,4 @@ with gr.Blocks(theme=custom_theme, css=css, title="Hermes AI") as app:
     )
 
 if __name__ == "__main__":
-    app.launch(share=False, server_name="0.0.0.0")
+    app.launch(share=False, server_name="0.0.0.0", allowed_paths=["assests"])
