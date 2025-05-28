@@ -4,7 +4,7 @@ import sys
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-
+from gradio import ChatMessage
 from app.backend.agent import generate_summary, generate_mindmap, qa_agent
 from app.backend.utils import get_transcript, get_video_metadata
 
@@ -300,25 +300,50 @@ def analyze_video(url, mode):
     except Exception as e:
         return f"**Error:** {str(e)}", None, ""
 
-def handle_translation(summary, lang):
-    try:
-        translated = qa_agent.translate_text(summary, lang)
-        return f"### {lang} Translation\n\n{translated}"
-    except Exception as e:
-        return f"**Translation Error:** {str(e)}"
-
 def handle_qa(history, url, question):
     try:
-        answer = qa_agent.answer_question(url, question)
+        result = qa_agent.answer_question(url, question)
+        
+        # Handle both error tuples and valid responses
+        if isinstance(result, tuple) and result[0].startswith("❌"):
+            return history + [
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": result[0]}
+            ]
+            
+        # Unpack successful responses
+        answer, confidence = result if isinstance(result, tuple) else (result, 0.0)
+        
+        # Format confidence display
+        confidence_str = f"**Confidence:** {confidence:.0%}" if confidence > 0 else ""
+        formatted_answer = f"{answer}\n\n{confidence_str}".strip()
+        
         return history + [
-            {"role": "user", "content": question},
-            {"role": "assistant", "content": answer},
+            {"role": "user", "content": str(question)},
+            {"role": "assistant", "content": formatted_answer},
         ]
     except Exception as e:
+        error_msg = f"⚠️ Error: {str(e)}"
+        if "ambiguous" in error_msg:  # Catch residual array truth errors
+            error_msg = "⚠️ System error: Please reprocess the video transcript"
         return history + [
             {"role": "user", "content": question},
-            {"role": "assistant", "content": f"⚠️ Error: {str(e)}"},
+            {"role": "assistant", "content": error_msg},
         ]
+
+
+#def handle_qa(history, url, question):
+#    try:
+#        answer = qa_agent.answer_question(url, question)
+#        return history + [
+#            {"role": "user", "content": question},
+#            {"role": "assistant", "content": answer},
+#        ]
+#    except Exception as e:
+#        return history + [
+#            {"role": "user", "content": question},
+#            {"role": "assistant", "content": f"⚠️ Error: {str(e)}"},
+#        ]
 
 def update_suggested_questions(summary):
     """Generate questions and return visibility state"""
@@ -367,6 +392,12 @@ def use_suggested_question(question):
         *[gr.update(visible=False) for _ in range(3)],
         gr.Row.update(visible=False)
     )
+def handle_translation(summary, lang):
+    try:
+        translated = qa_agent.translate_text(summary, lang)
+        return f"### {lang} Translation\n\n{translated}"
+    except Exception as e:
+        return f"**Translation Error:** {str(e)}"
 
 with gr.Blocks(theme=custom_theme, css=css, title="Hermes AI") as app:
     
@@ -459,13 +490,13 @@ with gr.Blocks(theme=custom_theme, css=css, title="Hermes AI") as app:
         with gr.Column(elem_classes="neon-card"):
             gr.HTML('<h2 class="section-header">💬 AI-Powered Q&A</h2>')
             qa_chat = gr.Chatbot(
+                type="messages",
                 height=400,
                 avatar_images=(
                     "https://i.imgur.com/7kQEsHU.png",
                     "https://i.imgur.com/8EeSUQ3.png",
                 ),
                 show_label=False,
-                type="messages",
                 elem_classes="chatbot"
             )
             
