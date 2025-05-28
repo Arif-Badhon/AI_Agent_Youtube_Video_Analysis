@@ -13,6 +13,58 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import torch
 
+# Global summarization components
+summarizer_tokenizer = AutoTokenizer.from_pretrained("facebook/bart-large-cnn")
+summarizer_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-large-cnn")
+summarizer = pipeline(
+    "summarization",
+    model=summarizer_model,
+    tokenizer=summarizer_tokenizer,
+    device=0 if torch.cuda.is_available() else -1,
+)
+
+def chunk_text(text, max_tokens=900):
+    """Split text by tokens instead of words"""
+    tokens = summarizer_tokenizer.encode(text, truncation=False, add_special_tokens=False)
+    for i in range(0, len(tokens), max_tokens):
+        chunk = tokens[i:i+max_tokens]
+        yield summarizer_tokenizer.decode(chunk, skip_special_tokens=True)
+
+def generate_summary(transcript, mode):
+    """Global summary generation function"""
+    if mode.lower() == "short":
+        max_length, min_length = 40, 20
+    elif mode.lower() == "medium":
+        max_length, min_length = 100, 40
+    else:  # detailed
+        max_length, min_length = 150, 60
+
+    summaries = []
+    for chunk in chunk_text(transcript, max_tokens=900):
+        inputs = summarizer_tokenizer(
+            chunk, 
+            max_length=1024, 
+            truncation=True, 
+            return_tensors="pt"
+        )
+        truncated_chunk = summarizer_tokenizer.decode(inputs["input_ids"][0])
+        summary = summarizer(
+            truncated_chunk,
+            max_length=max_length,
+            min_length=min_length,
+            do_sample=False,
+        )[0]["summary_text"]
+        summaries.append(summary)
+
+    if len(summaries) > 1:
+        combined = " ".join(summaries)
+        return summarizer(
+            combined,
+            max_length=max_length,
+            min_length=min_length,
+            do_sample=False,
+        )[0]["summary_text"]
+    return summaries[0] if summaries else "No summary generated"
 
 class QAAgent:
     def __init__(self):
@@ -55,90 +107,113 @@ class QAAgent:
             torch_dtype=torch.float32
         )
 
-    # app/backend/agent.py
-    def generate_questions(self, text, num_questions=3):
-        cleaned_text = ' '.join(text.split()[:500])  # Limit input size
-        prompt = f"generate questions: {cleaned_text}"
+    def process_transcript(self, url, transcript):
+        video_id = url.split("v=")[-1]
+        if not transcript.strip():
+            raise ValueError("Empty transcript received")
+        
+        chunks = self.chunk_text(transcript)
+        if not chunks:
+            raise ValueError("Failed to create text chunks")
+        
+        # Validate chunk content
+        chunks = [c.strip() for c in chunks if c.strip()]
+        
         try:
-            results = self.question_generator(
-                prompt,
-                max_length=80,
-                num_beams=5,
-                num_return_sequences=num_questions,
-                early_stopping=True
-            )
-            return [q['generated_text'].strip().replace('question: ', '') 
-                    for q in results if '?' in q['generated_text']]
+            embeddings = self.embedder.encode(chunks)
+            if len(embeddings) != len(chunks):
+                raise ValueError("Embedding count mismatch")
         except Exception as e:
-            print(f"Question generation failed: {e}")
-            return []
+            raise RuntimeError(f"Embedding failed: {str(e)}")
+        
+        self.cache[video_id] = {
+            "chunks": chunks,
+            "embeddings": embeddings
+        }
+        if len(embeddings) != len(chunks):
+            del self.cache[video_id]  # Clear invalid entry
+            raise ValueError("Embedding count mismatch")
 
 
     def chunk_text(self, text, chunk_size=300):
-        """Enhanced chunking with overlap"""
+        """Class-internal chunking with overlap"""
         words = text.split()
         chunks = []
         current_chunk = []
         current_length = 0
 
-        for i in range(len(words)):
-            current_chunk.append(words[i])
+        for word in words:
+            current_chunk.append(word)
             current_length += 1
-
             if current_length >= chunk_size:
                 chunks.append(" ".join(current_chunk))
-                # Keep 20% overlap
-                current_chunk = current_chunk[-int(chunk_size * 0.2) :]
+                current_chunk = current_chunk[-int(chunk_size * 0.2):]
                 current_length = len(current_chunk)
-
         if current_chunk:
             chunks.append(" ".join(current_chunk))
         return chunks
 
-    def process_transcript(self, url, transcript):
-        video_id = url.split("v=")[-1]
-        if video_id not in self.cache:
-            chunks = self.chunk_text(transcript)
-            self.cache[video_id] = {
-                "chunks": chunks,
-                "embeddings": self.embedder.encode(chunks),
-            }
-
     def answer_question(self, url, question):
-        video_id = url.split("v=")[-1]
-        if video_id not in self.cache:
-            raise ValueError("Process transcript first")
+        try:
+            video_id = url.split("v=")[-1]
+            if video_id not in self.cache:
+                raise ValueError("❌ Please process the video transcript first")
 
-        data = self.cache[video_id]
-        question_embed = self.embedder.encode([question])
+            data = self.cache[video_id]
+            
+            # URGENT FIX: Proper NumPy array check
+            if (not data.get("chunks") or 
+                data.get("embeddings") is None or 
+                data["embeddings"].size == 0):  # Critical .size check
+                del self.cache[video_id]  # Force reprocessing next time
+                return ("❌ Invalid context data - please reprocess video", 0.0)
 
-        similarities = cosine_similarity(question_embed, data["embeddings"])[0]
+            num_chunks = len(data["chunks"])
+            if num_chunks == 0 or data["embeddings"].shape[0] != num_chunks:
+                return ("❌ Context embedding mismatch", 0.0)
 
-        # Handle case with few chunks
-        valid_k = min(5, len(similarities))
-        if valid_k == 0:
-            return "❌ Not enough context to answer this question"
+            question_embed = self.embedder.encode([question])
+            similarities = cosine_similarity(question_embed, data["embeddings"])[0]
+            
+            valid_k = min(5, len(similarities))
+            if valid_k == 0:
+                return ("❌ Not enough context to answer", 0.0)
 
-        top_idxs = np.argsort(similarities)[
-            -valid_k:
-        ]  # Use argsort instead of argpartition
-        context = " ".join([data["chunks"][i] for i in top_idxs][-3:])
+            top_idxs = np.argsort(similarities)[-valid_k:]
+            context = " ".join([data["chunks"][i] for i in top_idxs[-3:]])
+            
+            if len(context.split()) > 500:
+                context = " ".join(context.split()[:500])
 
-        if len(context.split()) > 500:
-            context = " ".join(context.split()[:500])
+            result = self.qa_model(
+                question=question,
+                context=context,
+                max_answer_len=150,
+                handle_impossible_answer=True
+            )
 
-        result = self.qa_model(
-            question=question,
-            context=context,
-            max_answer_len=150,
-            handle_impossible_answer=True,
+            if result["answer"].strip() == "" or result["score"] < 0.10:
+                return (f"❌ Uncertain answer - here's relevant context:\n{context[:200]}...", 0.0)
+                
+            return (result["answer"], result["score"])
+        
+        except Exception as e:
+            return (f"⚠️ Critical error: {str(e)}", 0.0)
+
+
+
+    def generate_questions(self, text, num_questions=3):
+        cleaned_text = ' '.join(text.split()[:500])
+        prompt = f"generate questions: {cleaned_text}"
+        results = self.question_generator(
+            prompt,
+            max_length=80,
+            num_beams=5,
+            num_return_sequences=num_questions,
+            early_stopping=True
         )
-
-        if (
-            result["answer"].strip() == "" or result["score"] < 0.12
-        ):  # Slightly lower threshold
-            return f"I'm unsure, but here's a relevant excerpt: {context[:200]}..."
-        return f"{result['answer']} (Confidence: {result['score']:.0%})"
+        return [q['generated_text'].strip().replace('question: ', '') 
+                for q in results if '?' in q['generated_text']]
 
     def translate_text(self, text, target_lang):
         if target_lang not in self.lang_map:
@@ -156,97 +231,28 @@ class QAAgent:
             generated_tokens, skip_special_tokens=True
         )[0]
 
-
-# Explicitly load tokenizer with model_max_length
-summarizer_tokenizer = AutoTokenizer.from_pretrained(
-    "facebook/bart-large-cnn"
-    # model_max_length=1024  # BART's actual max input length
-)
-summarizer_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-large-cnn")
-
-summarizer = pipeline(
-    "summarization",
-    model=summarizer_model,
-    tokenizer=summarizer_tokenizer,
-    device=0 if torch.cuda.is_available() else -1,
-)
-
-
-def chunk_text(text, max_tokens=900):
-    """Split text by tokens instead of words"""
-    tokenizer = summarizer_tokenizer  # Reuse the initialized tokenizer
-    tokens = tokenizer.encode(text, truncation=False, add_special_tokens=False)
-
-    for i in range(0, len(tokens), max_tokens):
-        chunk = tokens[i : i + max_tokens]
-        yield tokenizer.decode(chunk, skip_special_tokens=True)
-
-
-def generate_summary(transcript, mode):
-    # Set summary lengths based on mode
-    if mode.lower() == "short":
-        max_length, min_length = 40, 20
-    elif mode.lower() == "medium":
-        max_length, min_length = 100, 40
-    else:  # detailed
-        max_length, min_length = 150, 60
-
-    # Always chunk transcript if too long
-    summaries = []
-    for chunk in chunk_text(transcript, max_tokens=900):
-        # Explicitly truncate input to 1024 tokens
-        inputs = summarizer_tokenizer(
-            chunk, max_length=1024, truncation=True, return_tensors="pt"
-        )
-        truncated_chunk = summarizer_tokenizer.decode(inputs["input_ids"][0])
-
-        summary = summarizer(
-            truncated_chunk,  # Use truncated input
-            max_length=max_length,
-            min_length=min_length,
-            do_sample=False,
-        )[0]["summary_text"]
-        summaries.append(summary)
-
-    # If multiple chunks, summarize the summaries
-    if len(summaries) > 1:
-        combined = " ".join(summaries)
-        final_summary = summarizer(
-            combined,
-            max_length=max_length,
-            min_length=min_length,
-            do_sample=False,
-            truncation=True,
-        )[0]["summary_text"]
-        return final_summary
-    else:
-        return summaries[0]
-
-
 def generate_mindmap(summary):
-    """Generate mindmap visualization"""
+    """Global mindmap generation function"""
     words = [word for word in summary.split() if len(word) > 3][:15]
     G = nx.Graph()
     for i, word in enumerate(words):
         G.add_node(word)
         if i > 0:
-            G.add_edge(words[i - 1], word)
-
+            G.add_edge(words[i-1], word)
     plt.figure(figsize=(16, 10))
     pos = nx.spring_layout(G, k=0.5)
     nx.draw(
-        G,
-        pos,
-        with_labels=True,
-        node_size=2500,
-        node_color="skyblue",
+        G, pos, 
+        with_labels=True, 
+        node_size=2500, 
+        node_color="skyblue", 
         font_size=10,
-        font_weight="bold",
-        edge_color="gray",
+        font_weight="bold", 
+        edge_color="gray"
     )
     plt.savefig("mindmap.png", bbox_inches="tight")
     plt.close()
     return "mindmap.png"
 
-
+# Singleton agent instance
 qa_agent = QAAgent()
