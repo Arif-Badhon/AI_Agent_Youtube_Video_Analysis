@@ -575,4 +575,4 @@ with gr.Blocks(theme=custom_theme, css=css, title="Hermes AI") as app:
     )
 
 if __name__ == "__main__":
-    app.launch(share=False, server_name="0.0.0.0", allowed_paths=["assests"])
+    app.launch(share=False, server_name="0.0.0.0", allowed_paths=["assests"], favicon_path="assests/hermes.png")
